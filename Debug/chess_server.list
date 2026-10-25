@@ -35,17 +35,17 @@ Idx Name          Size      VMA       LMA       File off  Algn
                   CONTENTS, READONLY, DEBUGGING, OCTETS
  15 .debug_rnglists 000000c4  00000000  00000000  000035f0  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 16 .debug_macro  00001a48  00000000  00000000  000036b4  2**0
+ 16 .debug_macro  00001a5b  00000000  00000000  000036b4  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 17 .debug_line   00001150  00000000  00000000  000050fc  2**0
+ 17 .debug_line   000010c4  00000000  00000000  0000510f  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 18 .debug_str    00007633  00000000  00000000  0000624c  2**0
+ 18 .debug_str    000076a0  00000000  00000000  000061d3  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 19 .comment      00000043  00000000  00000000  0000d87f  2**0
+ 19 .comment      00000043  00000000  00000000  0000d873  2**0
                   CONTENTS, READONLY
- 20 .debug_frame  000003f4  00000000  00000000  0000d8c4  2**2
+ 20 .debug_frame  000003f4  00000000  00000000  0000d8b8  2**2
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 21 .debug_line_str 0000005a  00000000  00000000  0000dcb8  2**0
+ 21 .debug_line_str 00000051  00000000  00000000  0000dcac  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
 
 Disassembly of section .text:
@@ -3058,7 +3058,7 @@ Infinite_Loop:
  80014ec:	5d08      	ldrb	r0, [r1, r4]
  80014ee:	4283      	cmp	r3, r0
  80014f0:	d104      	bne.n	80014fc <strncmp+0x1e>
- 80014f2:	42a2      	cmp	r2, r4
+ 80014f2:	4294      	cmp	r4, r2
  80014f4:	d002      	beq.n	80014fc <strncmp+0x1e>
  80014f6:	3401      	adds	r4, #1
  80014f8:	2b00      	cmp	r3, #0
