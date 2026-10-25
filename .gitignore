@@ -1,1 +1,50 @@
+# ---- STM32CubeIDE build output ----
+Debug/
+Release/
+*.elf
+*.bin
+*.hex
+*.map
+*.o
+*.d
+*.su
+*.cyclo
+*.list
+
+# ---- Per-machine debug launch config (contains absolute paths) ----
+*.launch
+st-link_gdbserver_log.txt
+
+# ---- Qt / CMake build output ----
+build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+chess_gui
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# ---- Editors ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---- OS ----
 .DS_Store
+Thumbs.db
+
+# ---- Logs ----
+*.log
