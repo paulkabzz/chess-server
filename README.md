@@ -23,15 +23,16 @@ REPOSITORY LAYOUT
 
   chess-server/
   |-- main.c                  STM32 firmware (bare-metal, no HAL)
-  |-- main.h                  register addresses
+  |-- main.h                  register addresses & hardware macros
   |-- startup_stm32f051r8tx.s vector table
   |-- STM32F051R8TX_FLASH.ld  linker script
   |-- syscalls.c, sysmem.c    CubeIDE boilerplate
   |-- .project / .cproject    STM32CubeIDE project files
-  |-- main.cpp                Qt 6 GUI (primary)
-  |-- CMakeLists.txt          Qt build
-  |-- gui_client.py           Python fallback GUI (optional)
-  |-- test_chess.py           pytest harness
+  |-- main.cpp                Qt 6 C++ GUI (primary)
+  |-- CMakeLists.txt          Qt CMake build
+  |-- Makefile                Cross-platform build/test automation
+  |-- test/
+  |   |-- test_chess.py       29-vector pytest harness
   |-- README.txt              this file
 
 
@@ -75,20 +76,24 @@ The USB cable used for flashing also carries the serial port
 boards.
 
 
-BUILD THE QT GUI
+MAKE COMMANDS QUICK REFERENCE
 --------------------------------------------------------------------------------
 
-    mkdir -p build && cd build
-    cmake ..
-    make -j$(nproc)
+We provide a cross-platform Makefile to automate the build and test
+process. Run these from the root `chess-server/` directory:
 
-Produces build/chess_gui.
+    make gui         Build the Qt 6 C++ application
+    make start_gui   Launch the built GUI (auto-detects the port)
+    make test        Run the 29-vector pytest suite
+    make check       Check if the serial port is currently in use
+    make free        Kill any process holding the serial port
+    make clean       Remove build artifacts
 
 
 RUN THE GUI
 --------------------------------------------------------------------------------
 
-    ./build/chess_gui /dev/ttyACM0
+    make start_gui
 
 Or leave off the argument and type the port into the text box.
 The window opens maximised.
@@ -110,34 +115,42 @@ PLAYING
        NACK:RANGE      square out of range or wrong length
        NACK:EMPTY      source square has no piece
 
-5. Pressing the user button on the STM32 board while connected
-   resets the game locally -- the GUI shows
-   "New game started (from board button) -- White to move".
-6. Click Resign to forfeit, or play to checkmate / stalemate.
+5. Hardware Buttons (on the STM32 board):
+       SW0 (PA0)       Soft reset (preserves current AI/HvH mode)
+       SW1 (PA1)       Force new Human vs Human game
+       SW2 (PA2)       Force new Human vs AI game
+       SW3 (PA3)       Resign current game
+
+   Pressing these buttons updates the GUI immediately via the serial
+   "EVENT:" broadcasts.
+
+6. Click Resign in the GUI to forfeit, or play to checkmate / stalemate.
+   A modal popup will appear declaring the winner and offering a
+   "Play Again" button.
 
 
 RUN THE AUTOMATED TESTS
 --------------------------------------------------------------------------------
 
-    python3 -m pytest -v test_chess.py
+    make test
 
-The suite opens /dev/ttyACM0, drives 29 assertions against the
-firmware, and closes the port.
+The suite opens /dev/ttyACM0 (or /dev/cu.usbmodem* on macOS), drives 29
+assertions against the firmware, and closes the port.
 
 IMPORTANT: do not have the GUI open at the same time -- the OS only
 allows one process to hold the serial port.
 
 Expected output (truncated):
 
-    test_chess.py::test_connect_returns_ok PASSED
-    test_chess.py::test_new_returns_initial_board PASSED
-    test_chess.py::test_legal_pawn_move PASSED
-    test_chess.py::test_illegal_geometry PASSED
-    test_chess.py::test_fools_mate PASSED
-    test_chess.py::test_stalemate_via_load PASSED
-    test_chess.py::test_ai_punishes_passive_move PASSED
+    test/test_chess.py::test_connect_returns_ok PASSED
+    test/test_chess.py::test_new_returns_initial_board PASSED
+    test/test_chess.py::test_legal_pawn_move PASSED
+    test/test_chess.py::test_illegal_geometry PASSED
+    test/test_chess.py::test_fools_mate PASSED
+    test/test_chess.py::test_stalemate_via_load PASSED
+    test/test_chess.py::test_ai_punishes_passive_move PASSED
     ...
-    ===================== 29 passed in ~5s =====================
+    ===================== 29 passed in 3.06s =====================
 
 
 PROTOCOL REFERENCE
@@ -185,8 +198,8 @@ Cannot open /dev/ttyACM0: Permission denied
 
 Device or resource busy
     Another process holds the port.
-    Run:  fuser /dev/ttyACM0
-    Then: kill <PID>
+    Run:  make check
+    Then: make free
 
 No /dev/ttyACM* appears on plug-in
     Try another USB cable (some are charge-only).
@@ -207,7 +220,7 @@ pytest fails with PermissionError
     Same as first row: add yourself to dialout.
 
 GUI window appears but no serial port field
-    Rebuild with cmake .. from the build/ folder.
+    Rebuild with `make clean` and then `make gui`.
 
 
 KNOWN LIMITATIONS
