@@ -1,37 +1,14 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdbool.h>
+#include <main.h>
 
-/* --- STM32F051 Direct Register Definitions --- */
-#define RCC_AHBENR    (*(volatile uint32_t *)0x40021014)
-#define RCC_APB2ENR   (*(volatile uint32_t *)0x40021018)
+volatile uint32_t millisecond_ticks = 0;
 
-#define GPIOA_MODER   (*(volatile uint32_t *)0x48000000)
-#define GPIOA_PUPDR   (*(volatile uint32_t *)0x4800000C)
-#define GPIOA_IDR     (*(volatile uint32_t *)0x48000010)
-#define GPIOA_AFRH    (*(volatile uint32_t *)0x48000024)
-
-#define GPIOB_MODER   (*(volatile uint32_t *)0x48000400)
-#define GPIOB_ODR     (*(volatile uint32_t *)0x48000414)
-
-#define USART1_CR1    (*(volatile uint32_t *)0x40013800)
-#define USART1_BRR    (*(volatile uint32_t *)0x4001380C)
-#define USART1_ISR    (*(volatile uint32_t *)0x4001381C)
-#define USART1_RDR    (*(volatile uint32_t *)0x40013824)
-#define USART1_TDR    (*(volatile uint32_t *)0x40013828)
-#define USART1_ICR    (*(volatile uint32_t *)0x40013820)
-
-/* Cortex-M0 SysTick Registers (1 ms hardware tick) */
-#define SYST_CSR      (*(volatile uint32_t *)0xE000E010)
-#define SYST_RVR      (*(volatile uint32_t *)0xE000E014)
-#define SYST_CVR      (*(volatile uint32_t *)0xE000E018)
-
-volatile uint32_t ms_ticks = 0;
 void SysTick_Handler(void) {
-    ms_ticks++;
+    millisecond_ticks++;
 }
 
-/* --- Server State Machine & Move Status Codes --- */
 typedef enum {
     STATE_IDLE = 0,
     STATE_IN_PROGRESS,
@@ -49,15 +26,15 @@ typedef enum {
 
 typedef struct {
     ServerState_t state;
-    char board[65];         // 64 squares + null terminator
-    char turn;              // 'W' or 'B'
-    uint16_t halfmove_clk;  // For 50-move draw rule
-    bool ai_enabled;        // Stretch Bonus: STM32 plays Black ('B')
+    char board[BOARD_STRING_LENGTH];
+    char active_turn;               // 'W' for White, 'B' for Black
+    uint16_t halfmove_clock;        // Counts half-moves for the 50-move draw rule
+    bool computer_opponent_on;      // True if the server plays as Black ('B')
 } ChessGame_t;
 
-static ChessGame_t game;
+static ChessGame_t current_game;
 
-static const char INIT_BOARD[65] =
+static const char INITIAL_BOARD[BOARD_STRING_LENGTH] =
     "rnbqkbnr"
     "pppppppp"
     "........"
@@ -67,353 +44,429 @@ static const char INIT_BOARD[65] =
     "PPPPPPPP"
     "RNBQKBNR";
 
-/* --- UART Transmit Helpers --- */
-static void uart_send_char(char c) {
-    while (!(USART1_ISR & (1U << 7)));
-    USART1_TDR = (uint8_t)c;
+
+static void uart_send_character(char character) {
+    while (!(USART1_ISR & USART1_ISR_TX_EMPTY));
+    USART1_TDR = (uint8_t)character;
 }
 
-static void uart_send_str(const char *s) {
-    while (*s) uart_send_char(*s++);
+static void uart_send_string(const char *message) {
+    while (*message) {
+        uart_send_character(*message++);
+    }
 }
 
 static void send_board_state(const char *prefix) {
-    uart_send_str(prefix);
-    uart_send_str(game.board);
-    uart_send_str(":TURN:");
-    uart_send_char(game.turn);
-    uart_send_str("\n");
+    uart_send_string(prefix);
+    uart_send_string(current_game.board);
+    uart_send_string(":TURN:");
+    uart_send_character(current_game.active_turn);
+    uart_send_string("\n");
 }
 
-/* --- Piece & Geometry Helpers --- */
-static int iabs(int x) { return (x < 0) ? -x : x; }
-static int isign(int x) { return (x > 0) - (x < 0); }
 
-static bool is_white(char p) { return (p >= 'A' && p <= 'Z'); }
-static bool is_black(char p) { return (p >= 'a' && p <= 'z'); }
-
-static bool is_own_piece(char p, char turn) {
-    return (turn == 'W') ? is_white(p) : is_black(p);
+static int absolute_value(int number) {
+    return (number < 0) ? -number : number;
 }
 
-static bool is_enemy_piece(char p, char turn) {
-    return (turn == 'W') ? is_black(p) : is_white(p);
+// Returns 1 if positive, -1 if negative, and 0 if zero. Used to step one square at a time.
+static int get_step_direction(int difference) {
+    return (difference > 0) - (difference < 0);
 }
 
-static char to_upper(char p) {
-    return (p >= 'a' && p <= 'z') ? (p - 'a' + 'A') : p;
+static bool is_white_piece(char piece) {
+    return (piece >= 'A' && piece <= 'Z');
 }
 
-static bool is_path_clear(const char *b, int r1, int c1, int r2, int c2) {
-    int sr = isign(r2 - r1);
-    int sc = isign(c2 - c1);
-    int r = r1 + sr;
-    int c = c1 + sc;
-    while (r != r2 || c != c2) {
-        if (b[r * 8 + c] != '.') return false;
-        r += sr;
-        c += sc;
+static bool is_black_piece(char piece) {
+    return (piece >= 'a' && piece <= 'z');
+}
+
+static bool belongs_to_player(char piece, char player_turn) {
+    return (player_turn == 'W') ? is_white_piece(piece) : is_black_piece(piece);
+}
+
+static bool is_opponent_piece(char piece, char player_turn) {
+    return (player_turn == 'W') ? is_black_piece(piece) : is_white_piece(piece);
+}
+
+static char to_uppercase_piece(char piece) {
+    return (piece >= 'a' && piece <= 'z') ? (piece - 'a' + 'A') : piece;
+}
+
+// Checks if all squares strictly between the start and destination are empty. /
+static bool is_path_clear(const char *board, int start_row, int start_column, int end_row, int end_column) {
+    int row_step = get_step_direction(end_row - start_row);
+    int column_step = get_step_direction(end_column - start_column);
+    int current_row = start_row + row_step;
+    int current_column = start_column + column_step;
+
+    while (current_row != end_row || current_column != end_column) {
+        if (board[current_row * BOARD_SIZE + current_column] != '.') {
+            return false;
+        }
+        current_row += row_step;
+        current_column += column_step;
     }
     return true;
 }
 
-/* Pseudo-legal piece movement geometry on board b */
-static bool check_piece_geometry(const char *b, int src, int dst) {
-    if (src == dst) return false;
-    char p = b[src];
-    char target = b[dst];
-    char type = to_upper(p);
-    bool white = is_white(p);
+// Checks only how the piece moves (movement rules and clear paths).
+   // Does NOT check whether the move leaves the mover's own king in check (see try_move for that).
+static bool can_piece_move(const char *board, int from_square, int to_square) {
+    if (from_square == to_square) return false;
 
-    int r1 = src / 8, c1 = src % 8;
-    int r2 = dst / 8, c2 = dst % 8;
-    int dr = r2 - r1, dc = c2 - c1;
-    int adr = iabs(dr), adc = iabs(dc);
+    char moving_piece = board[from_square];
+    char target_piece = board[to_square];
+    char piece_type = to_uppercase_piece(moving_piece);
+    bool is_white = is_white_piece(moving_piece);
 
-    switch (type) {
+    int start_row = from_square / BOARD_SIZE;
+    int start_column = from_square % BOARD_SIZE;
+    int end_row = to_square / BOARD_SIZE;
+    int end_column = to_square % BOARD_SIZE;
+
+    int row_difference = end_row - start_row;
+    int column_difference = end_column - start_column;
+    int row_distance = absolute_value(row_difference);
+    int column_distance = absolute_value(column_difference);
+
+    switch (piece_type) {
         case 'P': {
-            int dir = white ? -1 : 1;
-            int start_row = white ? 6 : 1;
-            if (dc == 0 && dr == dir && target == '.') return true;
-            if (dc == 0 && r1 == start_row && dr == 2 * dir &&
-                target == '.' && b[(r1 + dir) * 8 + c1] == '.') return true;
-            if (adc == 1 && dr == dir && target != '.' &&
-                is_enemy_piece(target, white ? 'W' : 'B')) return true;
+            int forward_direction = is_white ? -1 : 1;
+            int starting_row = is_white ? WHITE_STARTING_PAWN_ROW : BLACK_STARTING_PAWN_ROW;
+
+            // Standard 1-square forward move into an empty square
+            if (column_difference == 0 && row_difference == forward_direction && target_piece == '.') {
+                return true;
+            }
+            // Initial 2-square forward move from starting rank if both squares are empty
+            if (column_difference == 0 && start_row == starting_row &&
+                row_difference == 2 * forward_direction && target_piece == '.' &&
+                board[(start_row + forward_direction) * BOARD_SIZE + start_column] == '.') {
+                return true;
+            }
+            // Diagonal 1-square capture of an opponent's piece
+            if (column_distance == 1 && row_difference == forward_direction && target_piece != '.' &&
+                is_opponent_piece(target_piece, is_white ? 'W' : 'B')) {
+                return true;
+            }
             return false;
         }
         case 'N':
-            return (adr == 2 && adc == 1) || (adr == 1 && adc == 2);
+            return (row_distance == 2 && column_distance == 1) ||
+                   (row_distance == 1 && column_distance == 2);
         case 'K':
-            return (adr <= 1 && adc <= 1);
+            return (row_distance <= 1 && column_distance <= 1);
         case 'R':
-            if (r1 != r2 && c1 != c2) return false;
-            return is_path_clear(b, r1, c1, r2, c2);
+            if (start_row != end_row && start_column != end_column) return false;
+            return is_path_clear(board, start_row, start_column, end_row, end_column);
         case 'B':
-            if (adr != adc) return false;
-            return is_path_clear(b, r1, c1, r2, c2);
+            if (row_distance != column_distance) return false;
+            return is_path_clear(board, start_row, start_column, end_row, end_column);
         case 'Q':
-            if (r1 != r2 && c1 != c2 && adr != adc) return false;
-            return is_path_clear(b, r1, c1, r2, c2);
+            if (start_row != end_row && start_column != end_column && row_distance != column_distance) {
+                return false;
+            }
+            return is_path_clear(board, start_row, start_column, end_row, end_column);
         default:
             return false;
     }
 }
 
-static bool is_in_check(const char *b, char side) {
-    char king_char = (side == 'W') ? 'K' : 'k';
-    char enemy_side = (side == 'W') ? 'B' : 'W';
-    int king_sq = -1;
-    for (int i = 0; i < 64; i++) {
-        if (b[i] == king_char) { king_sq = i; break; }
-    }
-    if (king_sq < 0) return true;
+// Checks if the given player's king can currently be captured by any enemy piece. 
+static bool is_king_in_check(const char *board, char player_side) {
+    char target_king = (player_side == 'W') ? 'K' : 'k';
+    char opponent_side = (player_side == 'W') ? 'B' : 'W';
+    int king_square = -1;
 
-    for (int i = 0; i < 64; i++) {
-        if (is_own_piece(b[i], enemy_side)) {
-            if (check_piece_geometry(b, i, king_sq)) return true;
+    for (int square = 0; square < TOTAL_BOARD_SQUARES; square++) {
+        if (board[square] == target_king) {
+            king_square = square;
+            break;
         }
     }
-    return false;
-}
+    if (king_square < 0) return true;
 
-static void apply_move_on_buf(char *b, int src, int dst) {
-    char p = b[src];
-    b[dst] = p;
-    b[src] = '.';
-    /* Auto-promote Pawn to Queen on reaching back rank */
-    if (p == 'P' && (dst / 8) == 0) b[dst] = 'Q';
-    if (p == 'p' && (dst / 8) == 7) b[dst] = 'q';
-}
-
-/* Transactional Validator: never mutates g->board unless commit == true and MOVE_OK */
-static MoveStatus_t validate_move(ChessGame_t *g, int src, int dst, bool commit) {
-    if (src < 0 || src > 63 || dst < 0 || dst > 63) return ERR_RANGE;
-    char piece = g->board[src];
-    if (piece == '.') return ERR_EMPTY;
-    if (!is_own_piece(piece, g->turn)) return ERR_NOTURN;
-    char target = g->board[dst];
-    if (target != '.' && is_own_piece(target, g->turn)) return ERR_OCCUPIED;
-    if (!check_piece_geometry(g->board, src, dst)) return ERR_ILLEGAL;
-
-    /* Simulate on temporary buffer to guarantee King safety */
-    char temp[65];
-    memcpy(temp, g->board, 65);
-    apply_move_on_buf(temp, src, dst);
-    if (is_in_check(temp, g->turn)) return ERR_ILLEGAL;
-
-    if (commit) {
-        if (to_upper(piece) == 'P' || target != '.') g->halfmove_clk = 0;
-        else g->halfmove_clk++;
-        memcpy(g->board, temp, 65);
-        g->turn = (g->turn == 'W') ? 'B' : 'W';
-    }
-    return MOVE_OK;
-}
-
-static bool has_any_legal_move(ChessGame_t *g) {
-    for (int src = 0; src < 64; src++) {
-        if (is_own_piece(g->board[src], g->turn)) {
-            for (int dst = 0; dst < 64; dst++) {
-                if (validate_move(g, src, dst, false) == MOVE_OK) return true;
+    for (int square = 0; square < TOTAL_BOARD_SQUARES; square++) {
+        if (belongs_to_player(board[square], opponent_side)) {
+            if (can_piece_move(board, square, king_square)) {
+                return true;
             }
         }
     }
     return false;
 }
 
-static bool is_insufficient_material(const char *b) {
-    for (int i = 0; i < 64; i++) {
-        char c = to_upper(b[i]);
-        if (c != '.' && c != 'K') return false;
+/// Moves a piece on a board array and automatically promotes pawns that reach the last rank to a Queen.
+static void move_piece_on_board(char *board, int from_square, int to_square) {
+    char moving_piece = board[from_square];
+    board[to_square] = moving_piece;
+    board[from_square] = '.';
+
+    if (moving_piece == 'P' && (to_square / BOARD_SIZE) == WHITE_BACK_RANK_ROW) board[to_square] = 'Q';
+    if (moving_piece == 'p' && (to_square / BOARD_SIZE) == BLACK_BACK_RANK_ROW) board[to_square] = 'q';
+}
+
+ // Validates a full move, including making sure the player's own king is not left in check.
+  //  Only updates the actual game state if commit_move is true and the move is completely legal.
+static MoveStatus_t try_move(ChessGame_t *game_instance, int from_square, int to_square, bool commit_move) {
+    if (from_square < 0 || from_square >= TOTAL_BOARD_SQUARES ||
+        to_square < 0 || to_square >= TOTAL_BOARD_SQUARES) {
+        return ERR_RANGE;
+    }
+
+    char moving_piece = game_instance->board[from_square];
+    if (moving_piece == '.') return ERR_EMPTY;
+    if (!belongs_to_player(moving_piece, game_instance->active_turn)) return ERR_NOTURN;
+
+    char target_piece = game_instance->board[to_square];
+    if (target_piece != '.' && belongs_to_player(target_piece, game_instance->active_turn)) return ERR_OCCUPIED;
+    if (!can_piece_move(game_instance->board, from_square, to_square)) return ERR_ILLEGAL;
+
+    // Test the move on a temporary copy of the board to verify the king stays safe
+    char test_board[BOARD_STRING_LENGTH];
+    memcpy(test_board, game_instance->board, BOARD_STRING_LENGTH);
+    move_piece_on_board(test_board, from_square, to_square);
+    if (is_king_in_check(test_board, game_instance->active_turn)) return ERR_ILLEGAL;
+
+    if (commit_move) {
+        if (to_uppercase_piece(moving_piece) == 'P' || target_piece != '.') {
+            game_instance->halfmove_clock = 0;
+        } else {
+            game_instance->halfmove_clock++;
+        }
+        memcpy(game_instance->board, test_board, BOARD_STRING_LENGTH);
+        game_instance->active_turn = (game_instance->active_turn == 'W') ? 'B' : 'W';
+    }
+    return MOVE_OK;
+}
+
+// Returns true if the current player has at least one legal move available./
+static bool player_has_legal_moves(ChessGame_t *game_instance) {
+    for (int from_square = 0; from_square < TOTAL_BOARD_SQUARES; from_square++) {
+        if (belongs_to_player(game_instance->board[from_square], game_instance->active_turn)) {
+            for (int to_square = 0; to_square < TOTAL_BOARD_SQUARES; to_square++) {
+                if (try_move(game_instance, from_square, to_square, false) == MOVE_OK) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+// Returns true if only the two kings remain on the board (automatic draw).
+static bool has_only_kings_left(const char *board) {
+    for (int square = 0; square < TOTAL_BOARD_SQUARES; square++) {
+        char piece_type = to_uppercase_piece(board[square]);
+        if (piece_type != '.' && piece_type != 'K') return false;
     }
     return true;
 }
 
-/* --- Bonus: 1-Ply Greedy AI for Black ('B') --- */
-static int piece_value(char c) {
-    switch (to_upper(c)) {
-        case 'P': return 1;
-        case 'N': case 'B': return 3;
-        case 'R': return 5;
-        case 'Q': return 9;
-        default: return 0;
+static int get_piece_point_value(char piece) {
+    switch (to_uppercase_piece(piece)) {
+        case 'P': return PAWN_VALUE;
+        case 'N': return KNIGHT_VALUE;
+        case 'B': return BISHOP_VALUE;
+        case 'R': return ROOK_VALUE;
+        case 'Q': return QUEEN_VALUE;
+        default:  return 0;
     }
 }
 
-static void play_ai_move(ChessGame_t *g) {
-    int best_src = -1, best_dst = -1, best_score = -100;
-    for (int src = 0; src < 64; src++) {
-        if (is_own_piece(g->board[src], g->turn)) {
-            for (int dst = 0; dst < 64; dst++) {
-                if (validate_move(g, src, dst, false) == MOVE_OK) {
-                    int score = piece_value(g->board[dst]) * 10;
-                    int r = dst / 8, c = dst % 8;
-                    if (r >= 2 && r <= 5 && c >= 2 && c <= 5) score += 1;
-                    if (score > best_score) {
-                        best_score = score;
-                        best_src = src;
-                        best_dst = dst;
+/// Simple AI opponent: picks the legal move that captures the highest-value piece,
+// with a small bonus for moving into the center of the board.
+// Using a heristic search
+static void make_computer_move(ChessGame_t *game_instance) {
+    int best_from_square = -1;
+    int best_to_square = -1;
+    int highest_score = AI_INITIAL_LOWEST_SCORE;
+
+    for (int from_square = 0; from_square < TOTAL_BOARD_SQUARES; from_square++) {
+        if (belongs_to_player(game_instance->board[from_square], game_instance->active_turn)) {
+            for (int to_square = 0; to_square < TOTAL_BOARD_SQUARES; to_square++) {
+                if (try_move(game_instance, from_square, to_square, false) == MOVE_OK) {
+                    int move_score = get_piece_point_value(game_instance->board[to_square]) * AI_CAPTURE_SCORE_MULTIPLIER;
+                    int destination_row = to_square / BOARD_SIZE;
+                    int destination_column = to_square % BOARD_SIZE;
+
+                    if (destination_row >= CENTER_BOARD_MIN_INDEX && destination_row <= CENTER_BOARD_MAX_INDEX &&
+                        destination_column >= CENTER_BOARD_MIN_INDEX && destination_column <= CENTER_BOARD_MAX_INDEX) {
+                        move_score += AI_CENTER_SQUARE_BONUS;
+                    }
+                    if (move_score > highest_score) {
+                        highest_score = move_score;
+                        best_from_square = from_square;
+                        best_to_square = to_square;
                     }
                 }
             }
         }
     }
-    if (best_src >= 0) {
-        validate_move(g, best_src, best_dst, true);
+    if (best_from_square >= 0) {
+        try_move(game_instance, best_from_square, best_to_square, true);
     }
 }
 
-static int parse_sq(const char *s) {
-    if (s[0] < 'a' || s[0] > 'h' || s[1] < '1' || s[1] > '8') return -1;
-    int col = s[0] - 'a';
-    int row = 8 - (s[1] - '0');
-    return row * 8 + col;
+// Converts a 2-character chess coordinate like "e2" into a board array index (0 to 63). 
+static int square_text_to_index(const char *square_text) {
+    if (square_text[0] < 'a' || square_text[0] > 'h' ||
+        square_text[1] < '1' || square_text[1] > '8') {
+        return -1;
+    }
+    int column = square_text[0] - 'a';
+    int row = BOARD_SIZE - (square_text[1] - '0');
+    return row * BOARD_SIZE + column;
 }
 
-static void reset_game(bool ai) {
-    memcpy(game.board, INIT_BOARD, 65);
-    game.turn = 'W';
-    game.halfmove_clk = 0;
-    game.ai_enabled = ai;
-    game.state = STATE_IN_PROGRESS;
+static void reset_game(bool enable_computer_opponent) {
+    memcpy(current_game.board, INITIAL_BOARD, BOARD_STRING_LENGTH);
+    current_game.active_turn = 'W';
+    current_game.halfmove_clock = 0;
+    current_game.computer_opponent_on = enable_computer_opponent;
+    current_game.state = STATE_IN_PROGRESS;
 }
 
-static void update_leds(void) {
-    if (game.state == STATE_IDLE) {
-        GPIOB_ODR &= ~((1U << 0) | (1U << 1));
-    } else if (game.state == STATE_IN_PROGRESS) {
-        if (game.turn == 'W') {
-            GPIOB_ODR |=  (1U << 0); // PB0 ON for White
-            GPIOB_ODR &= ~(1U << 1);
+
+static void update_status_leds(void) {
+    if (current_game.state == STATE_IDLE) {
+        GPIOB_ODR &= ~LED_BOTH_PINS_MASK;
+    } else if (current_game.state == STATE_IN_PROGRESS) {
+        if (current_game.active_turn == 'W') {
+            GPIOB_ODR |=  LED_WHITE_TURN_PIN_MASK;
+            GPIOB_ODR &= ~LED_BLACK_TURN_PIN_MASK;
         } else {
-            GPIOB_ODR &= ~(1U << 0);
-            GPIOB_ODR |=  (1U << 1); // PB1 ON for Black
+            GPIOB_ODR &= ~LED_WHITE_TURN_PIN_MASK;
+            GPIOB_ODR |=  LED_BLACK_TURN_PIN_MASK;
         }
     } else {
-        if ((ms_ticks / 250) % 2 == 0) GPIOB_ODR |=  ((1U << 0) | (1U << 1));
-        else                           GPIOB_ODR &= ~((1U << 0) | (1U << 1));
+        if ((millisecond_ticks / LED_BLINK_INTERVAL_MS) % 2 == 0) {
+            GPIOB_ODR |=  LED_BOTH_PINS_MASK;
+        } else {
+            GPIOB_ODR &= ~LED_BOTH_PINS_MASK;
+        }
     }
 }
 
-/* --- Command Dispatcher --- */
-static void process_command(const char *cmd) {
-    if (strcmp(cmd, "CONNECT") == 0) {
-        game.state = STATE_IDLE;
-        uart_send_str("OK\n");
+static void handle_uart_command(const char *command) {
+    if (strcmp(command, "CONNECT") == 0 || strcmp(command, "DISCONNECT") == 0) {
+        current_game.state = STATE_IDLE;
+        uart_send_string("OK\n");
         return;
     }
-    if (strcmp(cmd, "DISCONNECT") == 0) {
-        game.state = STATE_IDLE;
-        uart_send_str("OK\n");
-        return;
-    }
-    if (strcmp(cmd, "NEW") == 0 || strcmp(cmd, "NEW:AI") == 0) {
-        reset_game(strcmp(cmd, "NEW:AI") == 0);
+    if (strcmp(command, "NEW") == 0 || strcmp(command, "NEW:AI") == 0) {
+        reset_game(strcmp(command, "NEW:AI") == 0);
         send_board_state("OK:BOARD:");
         return;
     }
-    /* Test helper: Load custom 64-char board + turn to test stalemate/draws rapidly */
-    if (strncmp(cmd, "LOAD:", 5) == 0 && strlen(cmd) == 71 && cmd[69] == ':') {
-        memcpy(game.board, cmd + 5, 64);
-        game.board[64] = '\0';
-        game.turn = cmd[70];
-        game.state = STATE_IN_PROGRESS;
+    // Test helper: Load a custom 64-character board and turn to test endgames rapidly
+    if (strncmp(command, "LOAD:", CMD_LOAD_PREFIX_LENGTH) == 0 &&
+        strlen(command) == CMD_LOAD_TOTAL_LENGTH &&
+        command[CMD_LOAD_COLON_INDEX] == ':') {
+        memcpy(current_game.board, command + CMD_LOAD_PREFIX_LENGTH, TOTAL_BOARD_SQUARES);
+        current_game.board[TOTAL_BOARD_SQUARES] = '\0';
+        current_game.active_turn = command[CMD_LOAD_TURN_INDEX];
+        current_game.state = STATE_IN_PROGRESS;
         send_board_state("OK:BOARD:");
         return;
     }
-    if (strcmp(cmd, "STATE") == 0) {
-        if (game.state == STATE_IDLE) uart_send_str("NACK:NOGAME\n");
+    if (strcmp(command, "STATE") == 0) {
+        if (current_game.state == STATE_IDLE) uart_send_string("NACK:NOGAME\n");
         else send_board_state("BOARD:");
         return;
     }
-    if (strcmp(cmd, "RESIGN") == 0) {
-        if (game.state != STATE_IN_PROGRESS) {
-            uart_send_str("NACK:NOGAME\n");
+    if (strcmp(command, "RESIGN") == 0) {
+        if (current_game.state != STATE_IN_PROGRESS) {
+            uart_send_string("NACK:NOGAME\n");
         } else {
-            game.state = STATE_GAME_OVER;
-            char winner = (game.turn == 'W') ? 'B' : 'W';
-            uart_send_str("OK:GAMEOVER:WIN:");
-            uart_send_char(winner);
-            uart_send_str("\n");
+            current_game.state = STATE_GAME_OVER;
+            char winner = (current_game.active_turn == 'W') ? 'B' : 'W';
+            uart_send_string("OK:GAMEOVER:WIN:");
+            uart_send_character(winner);
+            uart_send_string("\n");
         }
         return;
     }
-    /* Server-side move highlighting query: MOVES:e2 -> VALID:e3,e4 */
-    if (strncmp(cmd, "MOVES:", 6) == 0) {
-        if (game.state != STATE_IN_PROGRESS) {
-            uart_send_str("NACK:NOGAME\n");
+    // Returns all legal destination squares for a chosen square (e.g., "MOVES:e2" -> "VALID:e3,e4")
+    if (strncmp(command, "MOVES:", CMD_MOVES_PREFIX_LENGTH) == 0) {
+        if (current_game.state != STATE_IN_PROGRESS) {
+            uart_send_string("NACK:NOGAME\n");
             return;
         }
-        int src = parse_sq(cmd + 6);
-        if (src < 0 || strlen(cmd + 6) != 2) {
-            uart_send_str("NACK:RANGE\n");
+        const char *square_text = command + CMD_MOVES_PREFIX_LENGTH;
+        int from_square = square_text_to_index(square_text);
+        if (from_square < 0 || strlen(square_text) != SQUARE_COORDINATE_TEXT_LENGTH) {
+            uart_send_string("NACK:RANGE\n");
             return;
         }
-        uart_send_str("VALID:");
-        bool first = true;
-        if (is_own_piece(game.board[src], game.turn)) {
-            for (int dst = 0; dst < 64; dst++) {
-                if (validate_move(&game, src, dst, false) == MOVE_OK) {
-                    if (!first) uart_send_char(',');
-                    uart_send_char('a' + (dst % 8));
-                    uart_send_char('8' - (dst / 8));
-                    first = false;
+        uart_send_string("VALID:");
+        bool is_first_move_printed = true;
+        if (belongs_to_player(current_game.board[from_square], current_game.active_turn)) {
+            for (int to_square = 0; to_square < TOTAL_BOARD_SQUARES; to_square++) {
+                if (try_move(&current_game, from_square, to_square, false) == MOVE_OK) {
+                    if (!is_first_move_printed) uart_send_character(',');
+                    uart_send_character('a' + (to_square % BOARD_SIZE));
+                    uart_send_character('8' - (to_square / BOARD_SIZE));
+                    is_first_move_printed = false;
                 }
             }
         }
-        uart_send_str("\n");
+        uart_send_string("\n");
         return;
     }
-    /* MOVE:e2e4 */
-    if (strncmp(cmd, "MOVE:", 5) == 0) {
-        if (game.state != STATE_IN_PROGRESS) {
-            uart_send_str("NACK:NOGAME\n");
+    // Executes a player move (e.g., "MOVE:e2e4")
+    if (strncmp(command, "MOVE:", CMD_MOVE_PREFIX_LENGTH) == 0) {
+        if (current_game.state != STATE_IN_PROGRESS) {
+            uart_send_string("NACK:NOGAME\n");
             return;
         }
-        const char *m = cmd + 5;
-        if (strlen(m) != 4) {
-            uart_send_str("NACK:RANGE\n");
+        const char *move_text = command + CMD_MOVE_PREFIX_LENGTH;
+        if (strlen(move_text) != MOVE_COORDINATE_TEXT_LENGTH) {
+            uart_send_string("NACK:RANGE\n");
             return;
         }
-        int src = parse_sq(m);
-        int dst = parse_sq(m + 2);
-        if (src < 0 || dst < 0) {
-            uart_send_str("NACK:RANGE\n");
+        int from_square = square_text_to_index(move_text);
+        int to_square = square_text_to_index(move_text + SQUARE_COORDINATE_TEXT_LENGTH);
+        if (from_square < 0 || to_square < 0) {
+            uart_send_string("NACK:RANGE\n");
             return;
         }
 
-        MoveStatus_t st = validate_move(&game, src, dst, true);
-        if (st == ERR_EMPTY)    { uart_send_str("NACK:EMPTY\n"); return; }
-        if (st == ERR_NOTURN)   { uart_send_str("NACK:NOTURN\n"); return; }
-        if (st == ERR_OCCUPIED) { uart_send_str("NACK:OCCUPIED\n"); return; }
-        if (st == ERR_ILLEGAL)  { uart_send_str("NACK:ILLEGAL\n"); return; }
+        MoveStatus_t move_status = try_move(&current_game, from_square, to_square, true);
+        if (move_status == ERR_EMPTY)    { uart_send_string("NACK:EMPTY\n"); return; }
+        if (move_status == ERR_NOTURN)   { uart_send_string("NACK:NOTURN\n"); return; }
+        if (move_status == ERR_OCCUPIED) { uart_send_string("NACK:OCCUPIED\n"); return; }
+        if (move_status == ERR_ILLEGAL)  { uart_send_string("NACK:ILLEGAL\n"); return; }
 
-        /* Check if human move ended the game */
-        if (!has_any_legal_move(&game)) {
-            game.state = STATE_GAME_OVER;
-            if (is_in_check(game.board, game.turn)) {
-                char winner = (game.turn == 'W') ? 'B' : 'W';
-                uart_send_str("WIN:");
-                uart_send_char(winner);
+        // Check if the player's move ended the game by checkmate or stalemate
+        if (!player_has_legal_moves(&current_game)) {
+            current_game.state = STATE_GAME_OVER;
+            if (is_king_in_check(current_game.board, current_game.active_turn)) {
+                char winner = (current_game.active_turn == 'W') ? 'B' : 'W';
+                uart_send_string("WIN:");
+                uart_send_character(winner);
                 send_board_state(":BOARD:");
             } else {
                 send_board_state("DRAW:BOARD:");
             }
             return;
         }
-        if (is_insufficient_material(game.board) || game.halfmove_clk >= 100) {
-            game.state = STATE_GAME_OVER;
+        if (has_only_kings_left(current_game.board) ||
+            current_game.halfmove_clock >= FIFTY_MOVE_RULE_HALFMOVE_LIMIT) {
+            current_game.state = STATE_GAME_OVER;
             send_board_state("DRAW:BOARD:");
             return;
         }
 
-        /* If AI mode is enabled and it is Black's turn, STM32 plays immediately */
-        if (game.ai_enabled && game.turn == 'B') {
-            play_ai_move(&game);
-            if (!has_any_legal_move(&game)) {
-                game.state = STATE_GAME_OVER;
-                if (is_in_check(game.board, game.turn)) {
-                    uart_send_str("WIN:B");
+        // If the computer opponent is enabled and it is Black's turn, respond immediately
+        if (current_game.computer_opponent_on && current_game.active_turn == 'B') {
+            make_computer_move(&current_game);
+            if (!player_has_legal_moves(&current_game)) {
+                current_game.state = STATE_GAME_OVER;
+                if (is_king_in_check(current_game.board, current_game.active_turn)) {
+                    uart_send_string("WIN:B");
                     send_board_state(":BOARD:");
                 } else {
                     send_board_state("DRAW:BOARD:");
@@ -426,83 +479,98 @@ static void process_command(const char *cmd) {
         return;
     }
 
-    uart_send_str("NACK:BADCMD\n");
+    uart_send_string("NACK:BADCMD\n");
 }
 
+
 int main(void) {
-    RCC_AHBENR  |= (1U << 17) | (1U << 18);
-    RCC_APB2ENR |= (1U << 14);
+    // Enable peripheral clocks for GPIOA, GPIOB, and USART1
+    RCC_AHBENR  |= (RCC_AHBENR_GPIOA_CLOCK_EN | RCC_AHBENR_GPIOB_CLOCK_EN);
+    RCC_APB2ENR |= RCC_APB2ENR_USART1_CLOCK_EN;
 
-    GPIOB_MODER &= ~((3U << 0) | (3U << 2));
-    GPIOB_MODER |=  ((1U << 0) | (1U << 2));
+    // Configure PB0 and PB1 as general-purpose outputs for status LEDs
+    GPIOB_MODER &= ~GPIOB_MODER_PB0_PB1_CLEAR_MASK;
+    GPIOB_MODER |=  GPIOB_MODER_PB0_PB1_OUTPUT_MODE;
 
-    GPIOA_MODER &= ~(3U << 0);
-    GPIOA_PUPDR &= ~(3U << 0);
-    GPIOA_PUPDR |=  (1U << 0);
+    // Configure PA0 as input with pull-up resistor for the hardware reset button
+    GPIOA_MODER &= ~GPIOA_MODER_PA0_CLEAR_MASK;
+    GPIOA_PUPDR &= ~GPIOA_PUPDR_PA0_CLEAR_MASK;
+    GPIOA_PUPDR |=  GPIOA_PUPDR_PA0_PULLUP_ENABLE;
+ 
+    // Configure PA9 (TX) and PA10 (RX) for USART1 alternate function
+    GPIOA_MODER &= ~GPIOA_MODER_PA9_PA10_CLEAR_MASK;
+    GPIOA_MODER |=  GPIOA_MODER_PA9_PA10_ALT_MODE;
+    GPIOA_AFRH  &= ~GPIOA_AFRH_PA9_PA10_CLEAR_MASK;
+    GPIOA_AFRH  |=  GPIOA_AFRH_PA9_PA10_AF1_USART1;
 
-    GPIOA_MODER &= ~((3U << 18) | (3U << 20));
-    GPIOA_MODER |=  ((2U << 18) | (2U << 20));
-    GPIOA_AFRH  &= ~((0xFU << 4) | (0xFU << 8));
-    GPIOA_AFRH  |=  ((1U << 4)   | (1U << 8));
+    // Configure USART1 for 115200 baud (at 8 MHz clock) and enable TX, RX, and USART
+    USART1_BRR = USART1_BAUD_115200_AT_8MHZ;
+    USART1_CR1 = (USART1_CR1_TX_ENABLE | USART1_CR1_RX_ENABLE | USART1_CR1_ENABLE);
 
-    USART1_BRR = 69;
-    USART1_CR1 = (1U << 3) | (1U << 2) | (1U << 0);
-
-    SYST_RVR = 8000 - 1;
+    // Configure SysTick to trigger an interrupt every 1 millisecond
+    SYST_RVR = SYSTICK_1MS_RELOAD_AT_8MHZ;
     SYST_CVR = 0;
-    SYST_CSR = (1U << 2) | (1U << 1) | (1U << 0);
+    SYST_CSR = (SYSTICK_CSR_CLKSOURCE_CPU | SYSTICK_CSR_TICKINT_ENABLE | SYSTICK_CSR_ENABLE);
 
     reset_game(false);
-    game.state = STATE_IDLE;
+    current_game.state = STATE_IDLE;
 
-    char rx_buf[80];
-    uint8_t rx_idx = 0;
-    bool overflow = false;
-    uint32_t last_rx_time = 0;
-    uint32_t last_btn_time = 0;
-    bool btn_prev = true;
+    char receive_buffer[UART_RX_BUFFER_SIZE];
+    uint8_t buffer_index = 0;
+    bool buffer_overflowed = false;
+    uint32_t last_byte_received_time = 0;
+    uint32_t last_button_press_time = 0;
+    bool previous_button_state = true;
 
     while (1) {
-        update_leds();
+        update_status_leds();
 
-        /* PA0 Hardware Reset Button */
-        bool btn_curr = (GPIOA_IDR & (1U << 0)) != 0;
-        if (!btn_curr && btn_prev && (ms_ticks - last_btn_time > 50)) {
-            last_btn_time = ms_ticks;
-            reset_game(game.ai_enabled);
+        // Check PA0 hardware reset button (active-low with 50ms debounce)
+        bool current_button_state = (GPIOA_IDR & RESET_BUTTON_PIN_MASK) != 0;
+        if (!current_button_state && previous_button_state &&
+            (millisecond_ticks - last_button_press_time > BUTTON_DEBOUNCE_MS)) {
+            last_button_press_time = millisecond_ticks;
+            reset_game(current_game.computer_opponent_on);
             send_board_state("OK:BOARD:");
         }
-        btn_prev = btn_curr;
+        previous_button_state = current_button_state;
 
-        if (USART1_ISR & ((1U << 3) | (1U << 1) | (1U << 2))) {
-            USART1_ICR = (1U << 3) | (1U << 1) | (1U << 2);
+        // Clear UART overrun, noise, and framing error flags if set
+        if (USART1_ISR & USART1_ERROR_FLAGS_MASK) {
+            USART1_ICR = USART1_ERROR_FLAGS_MASK;
         }
 
-        if (USART1_ISR & (1U << 5)) {
-            char c = (char)(USART1_RDR & 0xFF);
-            last_rx_time = ms_ticks;
+        // Read incoming UART character when the receive data register is not empty
+        if (USART1_ISR & USART1_ISR_RX_NOT_EMPTY) {
+            char incoming_char = (char)(USART1_RDR & USART1_RDR_BYTE_MASK);
+            last_byte_received_time = millisecond_ticks;
 
-            if (c == '\r') {
-                /* Ignore CR */
-            } else if (c == '\n') {
-                if (overflow || rx_idx == 0) {
-                    uart_send_str("NACK:BADCMD\n");
+            if (incoming_char == '\r') {
+                // Ignore carriage return characters
+            } else if (incoming_char == '\n') {
+                if (buffer_overflowed || buffer_index == 0) {
+                    uart_send_string("NACK:BADCMD\n");
                 } else {
-                    rx_buf[rx_idx] = '\0';
-                    process_command(rx_buf);
+                    receive_buffer[buffer_index] = '\0';
+                    handle_uart_command(receive_buffer);
                 }
-                rx_idx = 0;
-                overflow = false;
+                buffer_index = 0;
+                buffer_overflowed = false;
             } else {
-                if (rx_idx < 75) rx_buf[rx_idx++] = c;
-                else overflow = true;
+                if (buffer_index < UART_MAX_COMMAND_LENGTH) {
+                    receive_buffer[buffer_index++] = incoming_char;
+                } else {
+                    buffer_overflowed = true;
+                }
             }
         }
 
-        if ((rx_idx > 0 || overflow) && (ms_ticks - last_rx_time > 500)) {
-            rx_idx = 0;
-            overflow = false;
-            uart_send_str("NACK:TIMEOUT\n");
+        // Reject incomplete commands that stall for more than 500ms without a newline
+        if ((buffer_index > 0 || buffer_overflowed) &&
+            (millisecond_ticks - last_byte_received_time > UART_RX_TIMEOUT_MS)) {
+            buffer_index = 0;
+            buffer_overflowed = false;
+            uart_send_string("NACK:TIMEOUT\n");
         }
     }
 }

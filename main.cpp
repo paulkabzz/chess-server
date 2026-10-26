@@ -4,7 +4,7 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
-#include <QLineEdit>
+#include <QComboBox>
 #include <QPushButton>
 #include <QSerialPort>
 #include <QSerialPortInfo>
@@ -22,8 +22,8 @@
 // ---------- geometry / encoding helpers -------------------------------------
 
 static const char *INIT_BOARD =
-"rnbqkbnr""pppppppp""........""........"
-"........""........""PPPPPPPP""RNBQKBNR";
+    "rnbqkbnr""pppppppp""........""........"
+    "........""........""PPPPPPPP""RNBQKBNR";
 
 static QChar glyphFor(char p) {
     switch (p) {
@@ -54,7 +54,7 @@ struct Move {
     char captured;      // '.' when not a capture
 };
 
-// Reconstruct which moves caused (from → to). Handles promotions & captures.
+// Reconstruct which moves caused (from -> to). Handles promotions & captures.
 static QVector<Move> diffMoves(const QByteArray &from, const QByteArray &to) {
     QVector<int> empties;   // squares that became empty
     QVector<int> filled;    // squares that changed to something non-'.'
@@ -70,8 +70,8 @@ static QVector<Move> diffMoves(const QByteArray &from, const QByteArray &to) {
             int src = empties[j];
             char srcPiece = from[src];
             bool match = (srcPiece == target)
-            || (srcPiece == 'P' && target == 'Q')
-            || (srcPiece == 'p' && target == 'q');
+                      || (srcPiece == 'P' && target == 'Q')
+                      || (srcPiece == 'p' && target == 'q');
             if (match) {
                 moves.append({src, dst, srcPiece, from[dst]});
                 empties.removeAt(j);
@@ -167,19 +167,19 @@ public:
         animating_ = true;
         animTimer_.start();
         update();
-                      }
+    }
 
-                      void cancelAnimation() {
-                          animTimer_.stop();
-                          animating_ = false;
-                          animSeq_.clear();
-                          animStep_ = 0;
-                          update();
-                      }
+    void cancelAnimation() {
+        animTimer_.stop();
+        animating_ = false;
+        animSeq_.clear();
+        animStep_ = 0;
+        update();
+    }
 
-                      void setSelected(int idx)  { selected_ = idx; update(); }
-                      void setLegal(const QSet<int> &d) { legal_ = d; update(); }
-                      void setLastMove(const QSet<int> &s) { last_ = s; update(); }
+    void setSelected(int idx)          { selected_ = idx; update(); }
+    void setLegal(const QSet<int> &d)  { legal_ = d; update(); }
+    void setLastMove(const QSet<int> &s) { last_ = s; update(); }
 
 signals:
     void clicked(int idx);
@@ -387,6 +387,10 @@ public:
                 this, &MainWindow::onSerialError);
     }
 
+    void setPortText(const QString &port) {
+        if (portBox_) portBox_->setCurrentText(port);
+    }
+
 private slots:
     void onConnect();
     void onDisconnect();
@@ -396,6 +400,7 @@ private slots:
     void onSquareClicked(int idx);
     void onReadyRead();
     void onSerialError(QSerialPort::SerialPortError err);
+    void refreshPorts();
 
 private:
     void setupUi();
@@ -410,7 +415,8 @@ private:
     void refreshButtons();
     void updateTurnLabel();
 
-    QLineEdit   *portEdit_ = nullptr;
+    QComboBox   *portBox_ = nullptr;
+    QPushButton *btnRefresh_ = nullptr;
     QPushButton *btnConnect_ = nullptr;
     QPushButton *btnDisconnect_ = nullptr;
     QPushButton *btnNew_ = nullptr;
@@ -439,9 +445,17 @@ void MainWindow::setupUi() {
 
     auto *top = new QHBoxLayout();
     top->addWidget(new QLabel("Port:", central));
-    portEdit_ = new QLineEdit("/dev/ttyACM0", central);
-    portEdit_->setMaximumWidth(220);
-    top->addWidget(portEdit_);
+
+    portBox_ = new QComboBox(central);
+    portBox_->setEditable(true);
+    portBox_->setMinimumWidth(260);
+    top->addWidget(portBox_);
+
+    btnRefresh_ = new QPushButton("⟳", central);
+    btnRefresh_->setToolTip("Refresh serial ports");
+    btnRefresh_->setFixedWidth(36);
+    top->addWidget(btnRefresh_);
+
     btnConnect_ = new QPushButton("Connect", central);
     btnDisconnect_ = new QPushButton("Disconnect", central);
     btnDisconnect_->setEnabled(false);
@@ -478,12 +492,51 @@ void MainWindow::setupUi() {
     setCentralWidget(central);
     resize(1200, 950);
 
+    connect(btnRefresh_,    &QPushButton::clicked, this, &MainWindow::refreshPorts);
     connect(btnConnect_,    &QPushButton::clicked, this, &MainWindow::onConnect);
     connect(btnDisconnect_, &QPushButton::clicked, this, &MainWindow::onDisconnect);
     connect(btnNew_,        &QPushButton::clicked, this, &MainWindow::onNewGame);
     connect(btnNewAI_,      &QPushButton::clicked, this, &MainWindow::onNewGameAI);
     connect(btnResign_,     &QPushButton::clicked, this, &MainWindow::onResign);
-    connect(board_, &BoardWidget::clicked, this, &MainWindow::onSquareClicked);
+    connect(board_,         &BoardWidget::clicked, this, &MainWindow::onSquareClicked);
+
+    refreshPorts();
+}
+
+void MainWindow::refreshPorts() {
+    QString previousText = portBox_->currentText();
+    portBox_->clear();
+
+    const auto ports = QSerialPortInfo::availablePorts();
+    int bestIndex = -1;
+
+    for (int i = 0; i < ports.size(); ++i) {
+        const QSerialPortInfo &info = ports[i];
+        QString label = info.systemLocation();
+        if (!info.description().isEmpty()) {
+            label += QString(" (%1)").arg(info.description());
+        }
+        portBox_->addItem(label, info.systemLocation());
+
+        // Auto-select STM32 (Vendor ID 0x0483) or common USB-UART adapters
+        if (info.vendorIdentifier() == 0x0483 ||
+            info.description().contains("STLink", Qt::CaseInsensitive) ||
+            info.description().contains("ST-Link", Qt::CaseInsensitive) ||
+            info.description().contains("UART", Qt::CaseInsensitive) ||
+            info.description().contains("USB", Qt::CaseInsensitive) ||
+            info.portName().contains("usb", Qt::CaseInsensitive) ||
+            info.portName().contains("ACM", Qt::CaseInsensitive)) {
+            bestIndex = i;
+        }
+    }
+
+    if (bestIndex >= 0) {
+        portBox_->setCurrentIndex(bestIndex);
+    } else if (!previousText.isEmpty()) {
+        portBox_->setCurrentText(previousText);
+    } else if (portBox_->count() == 0) {
+        portBox_->setCurrentText("/dev/ttyACM0");
+    }
 }
 
 void MainWindow::updateConnectionState() {
@@ -507,7 +560,8 @@ void MainWindow::updateConnectionState() {
 void MainWindow::refreshButtons() {
     bool connected = serial_.isOpen();
     btnConnect_->setEnabled(!connected);
-    portEdit_->setEnabled(!connected);
+    portBox_->setEnabled(!connected);
+    btnRefresh_->setEnabled(!connected);
     btnDisconnect_->setEnabled(connected);
     btnNew_->setEnabled(connected);
     btnNewAI_->setEnabled(connected);
@@ -519,11 +573,16 @@ void MainWindow::updateTurnLabel() {
         turnLabel_->setText("Turn: —");
     else
         turnLabel_->setText(QString("Turn: %1")
-        .arg(turn_ == "W" ? "White" : "Black"));
+            .arg(turn_ == "W" ? "White" : "Black"));
 }
 
 void MainWindow::onConnect() {
-    QString port = portEdit_->text().trimmed();
+    // Use stored systemLocation if selected from dropdown, otherwise parse typed text
+    QString port = portBox_->currentData().toString();
+    if (port.isEmpty() || !portBox_->currentText().startsWith(port)) {
+        port = portBox_->currentText().section(' ', 0, 0).trimmed();
+    }
+
     serial_.setPortName(port);
     serial_.setBaudRate(115200);
     serial_.setDataBits(QSerialPort::Data8);
@@ -650,8 +709,8 @@ void MainWindow::handleLine(const QString &line) {
         QStringList parts = line.mid(prefixLen).split(":");
         if (parts.size() >= 3 && parts[0].size() == 64) {
             bool wasReset = (parts[0] == QString(INIT_BOARD)
-            && boardBytes_ != QByteArray(64, '.')
-            && boardBytes_ != QByteArray(INIT_BOARD));
+                && boardBytes_ != QByteArray(64, '.')
+                && boardBytes_ != QByteArray(INIT_BOARD));
             applyBoard(parts[0], parts[2], pendingSrc_, pendingDst_);
             pendingSrc_ = pendingDst_ = -1;
             if (wasReset)
@@ -668,7 +727,7 @@ void MainWindow::handleLine(const QString &line) {
             applyBoard(parts[bi + 1], "-", pendingSrc_, pendingDst_);
         pendingSrc_ = pendingDst_ = -1;
         endGame(QString("%1 wins by checkmate")
-        .arg(winner == "W" ? "White" : "Black"));
+            .arg(winner == "W" ? "White" : "Black"));
         return;
     }
     if (line.startsWith("DRAW:")) {
@@ -684,19 +743,20 @@ void MainWindow::handleLine(const QString &line) {
         QString w = line.split(":").last();
         pendingSrc_ = pendingDst_ = -1;
         endGame(QString("%1 wins by resignation")
-        .arg(w == "W" ? "White" : "Black"));
+            .arg(w == "W" ? "White" : "Black"));
         return;
     }
     if (line.startsWith("VALID:")) {
         if (selected_ >= 0) {
             QString payload = line.mid(6);
             legal_.clear();
-            if (!payload.isEmpty())
+            if (!payload.isEmpty()) {
                 for (const QString &s : payload.split(",")) {
                     int idx = sqToIdx(s);
                     if (idx >= 0) legal_.insert(idx);
                 }
-                board_->setLegal(legal_);
+            }
+            board_->setLegal(legal_);
         }
         return;
     }
@@ -732,11 +792,11 @@ void MainWindow::applyBoard(const QString &board, const QString &turn,
         || newBoard == QByteArray(INIT_BOARD)
         || oldBoard == newBoard) {
         board_->setBoard(boardBytes_);
-        } else {
-            board_->transitionTo(boardBytes_, pendingSrc, pendingDst);
-        }
+    } else {
+        board_->transitionTo(boardBytes_, pendingSrc, pendingDst);
+    }
 
-        board_->setLastMove(lastMove_);
+    board_->setLastMove(lastMove_);
     board_->setSelected(-1);
     board_->setLegal({});
 
@@ -744,45 +804,42 @@ void MainWindow::applyBoard(const QString &board, const QString &turn,
     refreshButtons();
     statusLabel_->setText(
         QString("%1 to move").arg(turn_ == "W" ? "White" : "Black"));
-                            }
+}
 
-                            void MainWindow::endGame(const QString &reason) {
-                                over_ = true;
-                                selected_ = -1;
-                                legal_.clear();
-                                board_->setSelected(-1);
-                                board_->setLegal({});
-                                refreshButtons();
-                                statusLabel_->setText(QString("Game over — %1").arg(reason));
-                            }
+void MainWindow::endGame(const QString &reason) {
+    over_ = true;
+    selected_ = -1;
+    legal_.clear();
+    board_->setSelected(-1);
+    board_->setLegal({});
+    refreshButtons();
+    statusLabel_->setText(QString("Game over — %1").arg(reason));
+}
 
-                            void MainWindow::showNack(const QString &code) {
-                                QString msg;
-                                if (code == "NOGAME")      msg = "No game in progress — press New Game.";
-                                else if (code == "RANGE")  msg = "Move out of range — invalid square or format.";
-                                else if (code == "EMPTY")  msg = "Source square is empty.";
-                                else if (code == "NOTURN") msg = "That piece is not yours to move.";
-                                else if (code == "OCCUPIED") msg = "Destination square is occupied by your piece.";
-                                else if (code == "ILLEGAL")  msg = "Illegal move for that piece (or leaves king in check).";
-                                else if (code == "BADCMD")   msg = "Malformed or unknown command.";
-                                else if (code == "TIMEOUT")  msg = "Incomplete frame timed out.";
-                                else msg = code;
-                                statusLabel_->setText(QString("Rejected — %1").arg(msg));
-                            }
+void MainWindow::showNack(const QString &code) {
+    QString msg;
+    if (code == "NOGAME")      msg = "No game in progress — press New Game.";
+    else if (code == "RANGE")  msg = "Move out of range — invalid square or format.";
+    else if (code == "EMPTY")  msg = "Source square is empty.";
+    else if (code == "NOTURN") msg = "That piece is not yours to move.";
+    else if (code == "OCCUPIED") msg = "Destination square is occupied by your piece.";
+    else if (code == "ILLEGAL")  msg = "Illegal move for that piece (or leaves king in check).";
+    else if (code == "BADCMD")   msg = "Malformed or unknown command.";
+    else if (code == "TIMEOUT")  msg = "Incomplete frame timed out.";
+    else msg = code;
+    statusLabel_->setText(QString("Rejected — %1").arg(msg));
+}
 
-                            // ---------- entry point -----------------------------------------------------
+// ---------- entry point -----------------------------------------------------
 
-                            int main(int argc, char *argv[]) {
-                                QApplication app(argc, argv);
-                                MainWindow w;
-                                w.show();
-                                if (argc > 1) {
-                                    for (auto *le : w.findChildren<QLineEdit *>()) {
-                                        le->setText(QString::fromLocal8Bit(argv[1]));
-                                        break;
-                                    }
-                                }
-                                return app.exec();
-                            }
+int main(int argc, char *argv[]) {
+    QApplication app(argc, argv);
+    MainWindow w;
+    w.show();
+    if (argc > 1) {
+        w.setPortText(QString::fromLocal8Bit(argv[1]));
+    }
+    return app.exec();
+}
 
-                            #include "main.moc"
+#include "main.moc"
