@@ -6,6 +6,7 @@
 #include <QLabel>
 #include <QComboBox>
 #include <QPushButton>
+#include <QMessageBox>
 #include <QSerialPort>
 #include <QSerialPortInfo>
 #include <QMouseEvent>
@@ -22,8 +23,14 @@
 // ---------- geometry / encoding helpers -------------------------------------
 
 static const char *INIT_BOARD =
-    "rnbqkbnr""pppppppp""........""........"
-    "........""........""PPPPPPPP""RNBQKBNR";
+"rnbqkbnr""pppppppp""........""........"
+"........""........""PPPPPPPP""RNBQKBNR";
+
+// ---- animation pacing (milliseconds) --------------------------------------
+static constexpr int PLAYER_MOVE_DURATION_MS = 180;  // your move  -- snappy
+static constexpr int AI_THINK_HOLD_MS        = 400;  // pause before AI replies
+static constexpr int AI_MOVE_DURATION_MS     = 250;  // AI's move -- slower
+static constexpr int OUTCOME_POPUP_DELAY_MS  = 350;  // let animation settle
 
 static QChar glyphFor(char p) {
     switch (p) {
@@ -40,6 +47,7 @@ static QChar glyphFor(char p) {
 static QString idxToSq(int idx) {
     return QString(QChar('a' + (idx % 8))) + QChar('8' - (idx / 8));
 }
+
 static int sqToIdx(const QString &sq) {
     if (sq.size() != 2) return -1;
     int c = sq[0].toLatin1() - 'a';
@@ -51,13 +59,12 @@ static int sqToIdx(const QString &sq) {
 struct Move {
     int src, dst;
     char piece;
-    char captured;      // '.' when not a capture
+    char captured;
 };
 
-// Reconstruct which moves caused (from -> to). Handles promotions & captures.
 static QVector<Move> diffMoves(const QByteArray &from, const QByteArray &to) {
-    QVector<int> empties;   // squares that became empty
-    QVector<int> filled;    // squares that changed to something non-'.'
+    QVector<int> empties;
+    QVector<int> filled;
     for (int i = 0; i < 64; ++i) {
         if (from[i] == to[i]) continue;
         if (from[i] != '.' && to[i] == '.')      empties.append(i);
@@ -70,8 +77,8 @@ static QVector<Move> diffMoves(const QByteArray &from, const QByteArray &to) {
             int src = empties[j];
             char srcPiece = from[src];
             bool match = (srcPiece == target)
-                      || (srcPiece == 'P' && target == 'Q')
-                      || (srcPiece == 'p' && target == 'q');
+            || (srcPiece == 'P' && target == 'Q')
+            || (srcPiece == 'p' && target == 'q');
             if (match) {
                 moves.append({src, dst, srcPiece, from[dst]});
                 empties.removeAt(j);
@@ -95,7 +102,6 @@ public:
         connect(&animTimer_, &QTimer::timeout, this, &BoardWidget::onAnimTick);
     }
 
-    // Instant update (no animation). Use for fresh loads, resets, disconnects.
     void setBoard(const QByteArray &b) {
         if (b.size() != 64) return;
         board_ = b;
@@ -103,8 +109,6 @@ public:
         update();
     }
 
-    // Animated update. PendingSrc/Dst is the move the user just requested,
-    // so an AI reply that arrives in the same frame is animated *after* it.
     void transitionTo(const QByteArray &newBoard,
                       int pendingSrc = -1, int pendingDst = -1) {
         if (newBoard.size() != 64) return;
@@ -114,16 +118,12 @@ public:
         if (oldBoard == newBoard) { update(); return; }
 
         QVector<Move> moves = diffMoves(oldBoard, newBoard);
-
-        // Snap for anything that isn't a clean 1- or 2-move transition
-        // (new game, board-button reset, malformed state).
         if (moves.isEmpty() || moves.size() > 2) {
             cancelAnimation();
             update();
             return;
         }
 
-        // Order: user's pending move first (if any), then AI reply.
         QVector<Move> ordered;
         if (pendingSrc >= 0 && pendingDst >= 0) {
             for (int i = 0; i < moves.size(); ++i) {
@@ -137,7 +137,9 @@ public:
 
         animSeq_.clear();
         QByteArray cur = oldBoard;
-        for (const Move &m : ordered) {
+
+        for (int i = 0; i < ordered.size(); ++i) {
+            const Move &m = ordered[i];
             QByteArray nxt = cur;
             nxt[m.dst] = nxt[m.src];
             nxt[m.src] = '.';
@@ -151,9 +153,19 @@ public:
             s.dst = m.dst;
             s.piece = m.piece;
             s.captured = m.captured;
-            animSeq_.append(s);
-            cur = nxt;
+
+            if (i == 0 && pendingSrc >= 0 && pendingDst >= 0 &&
+                m.src == pendingSrc && m.dst == pendingDst) {
+                s.holdMs     = 0;
+            s.durationMs = PLAYER_MOVE_DURATION_MS;
+                } else {
+                    s.holdMs     = AI_THINK_HOLD_MS;
+                    s.durationMs = AI_MOVE_DURATION_MS;
+                }
+                animSeq_.append(s);
+                cur = nxt;
         }
+
         if (cur != newBoard) {
             AnimStep s;
             s.fromBoard = cur;
@@ -167,19 +179,19 @@ public:
         animating_ = true;
         animTimer_.start();
         update();
-    }
+                      }
 
-    void cancelAnimation() {
-        animTimer_.stop();
-        animating_ = false;
-        animSeq_.clear();
-        animStep_ = 0;
-        update();
-    }
+                      void cancelAnimation() {
+                          animTimer_.stop();
+                          animating_ = false;
+                          animSeq_.clear();
+                          animStep_ = 0;
+                          update();
+                      }
 
-    void setSelected(int idx)          { selected_ = idx; update(); }
-    void setLegal(const QSet<int> &d)  { legal_ = d; update(); }
-    void setLastMove(const QSet<int> &s) { last_ = s; update(); }
+                      void setSelected(int idx)          { selected_ = idx; update(); }
+                      void setLegal(const QSet<int> &d)  { legal_ = d; update(); }
+                      void setLastMove(const QSet<int> &s) { last_ = s; update(); }
 
 signals:
     void clicked(int idx);
@@ -196,8 +208,10 @@ private slots:
             update();
             return;
         }
-        qint64 now = QDateTime::currentMSecsSinceEpoch();
-        if (now - animStartMs_ >= STEP_MS) {
+        const AnimStep &step = animSeq_[animStep_];
+        qint64 now   = QDateTime::currentMSecsSinceEpoch();
+        qint64 total = step.holdMs + step.durationMs;
+        if (now - animStartMs_ >= total) {
             animStep_++;
             animStartMs_ = now;
             if (animStep_ >= animSeq_.size()) {
@@ -212,14 +226,13 @@ private:
     struct AnimStep {
         QByteArray fromBoard;
         QByteArray toBoard;
-        int src;
-        int dst;
-        char piece;
-        char captured;
+        int  src = -1;
+        int  dst = -1;
+        char piece = '.';
+        char captured = '.';
+        int  holdMs = 0;
+        int  durationMs = PLAYER_MOVE_DURATION_MS;
     };
-
-    static constexpr int STEP_MS = 180;   // duration of each move
-    static constexpr int SQ_MIN  = 32;
 
     QByteArray board_;
     int        selected_ = -1;
@@ -249,7 +262,6 @@ void BoardWidget::paintEvent(QPaintEvent *) {
     QColor selTint(130, 151, 105, 200);
     QColor legalDot("#2f2f2f");
 
-    // Board squares + highlights
     for (int i = 0; i < 64; ++i) {
         int r = i / 8, c = i % 8;
         QRect rc(offX + c * sq, offY + r * sq, sq, sq);
@@ -258,7 +270,6 @@ void BoardWidget::paintEvent(QPaintEvent *) {
         if (selected_ == i)    p.fillRect(rc, selTint);
     }
 
-    // Determine which board to render
     QByteArray renderBoard = board_;
     int moveSrc = -1, moveDst = -1;
     char movingPiece = '.';
@@ -272,16 +283,20 @@ void BoardWidget::paintEvent(QPaintEvent *) {
         moveDst = step.dst;
         movingPiece = step.piece;
         capturedPiece = step.captured;
+
         qint64 now = QDateTime::currentMSecsSinceEpoch();
-        float raw = float(now - animStartMs_) / float(STEP_MS);
+        qint64 elapsed = now - animStartMs_;
+        float raw = 0.0f;
+        if (elapsed > step.holdMs && step.durationMs > 0) {
+            raw = float(elapsed - step.holdMs) / float(step.durationMs);
+        }
         raw = qBound(0.0f, raw, 1.0f);
-        t = 1.0f - qPow(1.0f - raw, 3.0f);   // ease-out cubic
+        t = 1.0f - qPow(1.0f - raw, 3.0f);
     }
 
     QFont base("DejaVu Sans");
     base.setPixelSize(qMax(12, int(sq * 0.63)));
 
-    // Static pieces from renderBoard, skipping the animated move
     for (int i = 0; i < 64; ++i) {
         if (i == moveSrc) continue;
         if (moveDst >= 0 && i == moveDst && capturedPiece != '.') continue;
@@ -301,7 +316,6 @@ void BoardWidget::paintEvent(QPaintEvent *) {
         p.drawText(rc, Qt::AlignCenter, QString(glyph));
     }
 
-    // Moving piece at interpolated position
     if (moveSrc >= 0 && moveDst >= 0 && movingPiece != '.') {
         QPointF a(offX + (moveSrc % 8) * sq + sq / 2.0,
                   offY + (moveSrc / 8) * sq + sq / 2.0);
@@ -322,7 +336,6 @@ void BoardWidget::paintEvent(QPaintEvent *) {
         p.drawText(rc, Qt::AlignCenter, QString(glyph));
     }
 
-    // Shrinking captured piece
     if (moveDst >= 0 && capturedPiece != '.') {
         float scale = 1.0f - t;
         int px = qMax(1, int(sq * 0.63 * scale));
@@ -336,7 +349,14 @@ void BoardWidget::paintEvent(QPaintEvent *) {
         p.drawText(rc, Qt::AlignCenter, QString(glyph));
     }
 
-    // Legal-move indicators
+    if (animating_ && animStep_ < animSeq_.size()) {
+        const AnimStep &step = animSeq_[animStep_];
+        qint64 elapsed = QDateTime::currentMSecsSinceEpoch() - animStartMs_;
+        if (elapsed < step.holdMs) {
+            p.fillRect(offX, offY, side, side, QColor(0, 0, 0, 18));
+        }
+    }
+
     p.setFont(base);
     for (int dst : legal_) {
         QRect rc(offX + (dst % 8) * sq, offY + (dst / 8) * sq, sq, sq);
@@ -357,8 +377,6 @@ void BoardWidget::paintEvent(QPaintEvent *) {
 
 void BoardWidget::mousePressEvent(QMouseEvent *ev) {
     if (ev->button() != Qt::LeftButton) return;
-    // If the user clicked during an animation, snap to the final state so
-    // their input is applied against the authoritative board.
     if (animating_) cancelAnimation();
 
     int side = qMin(width(), height());
@@ -415,6 +433,13 @@ private:
     void refreshButtons();
     void updateTurnLabel();
 
+    void scheduleOutcomePopup(const QString &title,
+                              const QString &headline,
+                              const QString &subtext);
+    void showOutcomePopup(const QString &title,
+                          const QString &headline,
+                          const QString &subtext);
+
     QComboBox   *portBox_ = nullptr;
     QPushButton *btnRefresh_ = nullptr;
     QPushButton *btnConnect_ = nullptr;
@@ -437,6 +462,11 @@ private:
     QSet<int>   lastMove_;
     int         pendingSrc_ = -1;
     int         pendingDst_ = -1;
+
+    // ---- game-over popup state ----
+    int  gameGeneration_  = 0;
+    bool currentModeIsAI_ = false;
+    bool outcomePopupOpen_ = false;
 };
 
 void MainWindow::setupUi() {
@@ -518,7 +548,6 @@ void MainWindow::refreshPorts() {
         }
         portBox_->addItem(label, info.systemLocation());
 
-        // Auto-select STM32 (Vendor ID 0x0483) or common USB-UART adapters
         if (info.vendorIdentifier() == 0x0483 ||
             info.description().contains("STLink", Qt::CaseInsensitive) ||
             info.description().contains("ST-Link", Qt::CaseInsensitive) ||
@@ -527,7 +556,7 @@ void MainWindow::refreshPorts() {
             info.portName().contains("usb", Qt::CaseInsensitive) ||
             info.portName().contains("ACM", Qt::CaseInsensitive)) {
             bestIndex = i;
-        }
+            }
     }
 
     if (bestIndex >= 0) {
@@ -573,11 +602,10 @@ void MainWindow::updateTurnLabel() {
         turnLabel_->setText("Turn: —");
     else
         turnLabel_->setText(QString("Turn: %1")
-            .arg(turn_ == "W" ? "White" : "Black"));
+        .arg(turn_ == "W" ? "White" : "Black"));
 }
 
 void MainWindow::onConnect() {
-    // Use stored systemLocation if selected from dropdown, otherwise parse typed text
     QString port = portBox_->currentData().toString();
     if (port.isEmpty() || !portBox_->currentText().startsWith(port)) {
         port = portBox_->currentText().section(' ', 0, 0).trimmed();
@@ -626,6 +654,8 @@ void MainWindow::onDisconnect() {
 }
 
 void MainWindow::startGame(bool ai) {
+    gameGeneration_++;
+    currentModeIsAI_ = ai;
     over_ = true;
     selected_ = -1;
     legal_.clear();
@@ -704,13 +734,27 @@ void MainWindow::onSerialError(QSerialPort::SerialPortError err) {
 }
 
 void MainWindow::handleLine(const QString &line) {
+    if (line.startsWith("EVENT:")) {
+        QString ev = line.mid(6);
+        if (ev == "NEW") {
+            gameGeneration_++;
+            currentModeIsAI_ = false;
+            statusLabel_->setText("Board button: New game (human vs human)");
+        } else if (ev == "NEW_AI") {
+            gameGeneration_++;
+            currentModeIsAI_ = true;
+            statusLabel_->setText("Board button: New game vs AI");
+        }
+        return;
+    }
+
     if (line.startsWith("OK:BOARD:") || line.startsWith("BOARD:")) {
         int prefixLen = line.startsWith("OK:BOARD:") ? 9 : 6;
         QStringList parts = line.mid(prefixLen).split(":");
         if (parts.size() >= 3 && parts[0].size() == 64) {
             bool wasReset = (parts[0] == QString(INIT_BOARD)
-                && boardBytes_ != QByteArray(64, '.')
-                && boardBytes_ != QByteArray(INIT_BOARD));
+            && boardBytes_ != QByteArray(64, '.')
+            && boardBytes_ != QByteArray(INIT_BOARD));
             applyBoard(parts[0], parts[2], pendingSrc_, pendingDst_);
             pendingSrc_ = pendingDst_ = -1;
             if (wasReset)
@@ -719,6 +763,7 @@ void MainWindow::handleLine(const QString &line) {
         }
         return;
     }
+
     if (line.startsWith("WIN:")) {
         QStringList parts = line.split(":");
         QString winner = parts.size() > 1 ? parts[1] : "?";
@@ -726,10 +771,16 @@ void MainWindow::handleLine(const QString &line) {
         if (bi >= 0 && bi + 1 < parts.size())
             applyBoard(parts[bi + 1], "-", pendingSrc_, pendingDst_);
         pendingSrc_ = pendingDst_ = -1;
-        endGame(QString("%1 wins by checkmate")
-            .arg(winner == "W" ? "White" : "Black"));
+        QString winName  = (winner == "W") ? "White" : "Black";
+        QString loseName = (winner == "W") ? "Black" : "White";
+        endGame(QString("%1 wins by checkmate").arg(winName));
+        scheduleOutcomePopup(
+            "Checkmate",
+            QString("%1 wins by checkmate").arg(winName),
+                             QString("%1 loses").arg(loseName));
         return;
     }
+
     if (line.startsWith("DRAW:")) {
         QStringList parts = line.split(":");
         int bi = parts.indexOf("BOARD");
@@ -737,15 +788,26 @@ void MainWindow::handleLine(const QString &line) {
             applyBoard(parts[bi + 1], "-", pendingSrc_, pendingDst_);
         pendingSrc_ = pendingDst_ = -1;
         endGame("Draw (stalemate / 50-move / insufficient material)");
+        scheduleOutcomePopup(
+            "Draw",
+            "The game ended in a draw",
+            "Reason: stalemate, 50-move rule, or insufficient material");
         return;
     }
+
     if (line.startsWith("OK:GAMEOVER:")) {
         QString w = line.split(":").last();
         pendingSrc_ = pendingDst_ = -1;
-        endGame(QString("%1 wins by resignation")
-            .arg(w == "W" ? "White" : "Black"));
+        QString winName  = (w == "W") ? "White" : "Black";
+        QString loseName = (w == "W") ? "Black" : "White";
+        endGame(QString("%1 wins by resignation").arg(winName));
+        scheduleOutcomePopup(
+            "Resignation",
+            QString("%1 wins by resignation").arg(winName),
+                             QString("%1 resigned").arg(loseName));
         return;
     }
+
     if (line.startsWith("VALID:")) {
         if (selected_ >= 0) {
             QString payload = line.mid(6);
@@ -760,12 +822,15 @@ void MainWindow::handleLine(const QString &line) {
         }
         return;
     }
+
     if (line == "OK") { statusLabel_->setText("Ready"); return; }
+
     if (line.startsWith("NACK:")) {
         pendingSrc_ = pendingDst_ = -1;
         showNack(line.mid(5));
         return;
     }
+
     statusLabel_->setText(QString("Unhandled: %1").arg(line));
 }
 
@@ -787,16 +852,15 @@ void MainWindow::applyBoard(const QString &board, const QString &turn,
     if (turn == "W" || turn == "B") turn_ = turn;
     over_ = false;
 
-    // Board widget animates from its current state to the new one.
     if (oldBoard == QByteArray(64, '.')
         || newBoard == QByteArray(INIT_BOARD)
         || oldBoard == newBoard) {
         board_->setBoard(boardBytes_);
-    } else {
-        board_->transitionTo(boardBytes_, pendingSrc, pendingDst);
-    }
+        } else {
+            board_->transitionTo(boardBytes_, pendingSrc, pendingDst);
+        }
 
-    board_->setLastMove(lastMove_);
+        board_->setLastMove(lastMove_);
     board_->setSelected(-1);
     board_->setLegal({});
 
@@ -804,42 +868,79 @@ void MainWindow::applyBoard(const QString &board, const QString &turn,
     refreshButtons();
     statusLabel_->setText(
         QString("%1 to move").arg(turn_ == "W" ? "White" : "Black"));
-}
+                            }
 
-void MainWindow::endGame(const QString &reason) {
-    over_ = true;
-    selected_ = -1;
-    legal_.clear();
-    board_->setSelected(-1);
-    board_->setLegal({});
-    refreshButtons();
-    statusLabel_->setText(QString("Game over — %1").arg(reason));
-}
+                            void MainWindow::endGame(const QString &reason) {
+                                over_ = true;
+                                selected_ = -1;
+                                legal_.clear();
+                                board_->setSelected(-1);
+                                board_->setLegal({});
+                                refreshButtons();
+                                statusLabel_->setText(QString("Game over — %1").arg(reason));
+                            }
 
-void MainWindow::showNack(const QString &code) {
-    QString msg;
-    if (code == "NOGAME")      msg = "No game in progress — press New Game.";
-    else if (code == "RANGE")  msg = "Move out of range — invalid square or format.";
-    else if (code == "EMPTY")  msg = "Source square is empty.";
-    else if (code == "NOTURN") msg = "That piece is not yours to move.";
-    else if (code == "OCCUPIED") msg = "Destination square is occupied by your piece.";
-    else if (code == "ILLEGAL")  msg = "Illegal move for that piece (or leaves king in check).";
-    else if (code == "BADCMD")   msg = "Malformed or unknown command.";
-    else if (code == "TIMEOUT")  msg = "Incomplete frame timed out.";
-    else msg = code;
-    statusLabel_->setText(QString("Rejected — %1").arg(msg));
-}
+                            void MainWindow::showNack(const QString &code) {
+                                QString msg;
+                                if (code == "NOGAME")      msg = "No game in progress — press New Game.";
+                                else if (code == "RANGE")  msg = "Move out of range — invalid square or format.";
+                                else if (code == "EMPTY")  msg = "Source square is empty.";
+                                else if (code == "NOTURN") msg = "That piece is not yours to move.";
+                                else if (code == "OCCUPIED") msg = "Destination square is occupied by your piece.";
+                                else if (code == "ILLEGAL")  msg = "Illegal move for that piece (or leaves king in check).";
+                                else if (code == "BADCMD")   msg = "Malformed or unknown command.";
+                                else if (code == "TIMEOUT")  msg = "Incomplete frame timed out.";
+                                else msg = code;
+                                statusLabel_->setText(QString("Rejected — %1").arg(msg));
+                            }
 
-// ---------- entry point -----------------------------------------------------
+                            // ---------- game-over popup ------------------------------------------------
 
-int main(int argc, char *argv[]) {
-    QApplication app(argc, argv);
-    MainWindow w;
-    w.show();
-    if (argc > 1) {
-        w.setPortText(QString::fromLocal8Bit(argv[1]));
-    }
-    return app.exec();
-}
+                            void MainWindow::scheduleOutcomePopup(const QString &title,
+                                                                  const QString &headline,
+                                                                  const QString &subtext) {
+                                int thisGen = gameGeneration_;
+                                QTimer::singleShot(OUTCOME_POPUP_DELAY_MS, this,
+                                                   [this, thisGen, title, headline, subtext]() {
+                                                       if (gameGeneration_ != thisGen) return;
+                                                       showOutcomePopup(title, headline, subtext);
+                                                   });
+                                                                  }
 
-#include "main.moc"
+                                                                  void MainWindow::showOutcomePopup(const QString &title,
+                                                                                                    const QString &headline,
+                                                                                                    const QString &subtext) {
+                                                                      if (outcomePopupOpen_) return;
+                                                                      outcomePopupOpen_ = true;
+
+                                                                      QMessageBox box(this);
+                                                                      box.setWindowTitle(title);
+                                                                      box.setIcon(QMessageBox::Information);
+                                                                      box.setText(headline);
+                                                                      if (!subtext.isEmpty()) box.setInformativeText(subtext);
+
+                                                                      QPushButton *againBtn = box.addButton("Play Again", QMessageBox::AcceptRole);
+                                                                      box.addButton("Close", QMessageBox::RejectRole);
+                                                                      box.setDefaultButton(againBtn);
+
+                                                                      box.exec();
+                                                                      outcomePopupOpen_ = false;
+
+                                                                      if (box.clickedButton() == againBtn) {
+                                                                          startGame(currentModeIsAI_);
+                                                                      }
+                                                                                                    }
+
+                                                                                                    // ---------- entry point -----------------------------------------------------
+
+                                                                                                    int main(int argc, char *argv[]) {
+                                                                                                        QApplication app(argc, argv);
+                                                                                                        MainWindow w;
+                                                                                                        w.show();
+                                                                                                        if (argc > 1) {
+                                                                                                            w.setPortText(QString::fromLocal8Bit(argv[1]));
+                                                                                                        }
+                                                                                                        return app.exec();
+                                                                                                    }
+
+                                                                                                    #include "main.moc"

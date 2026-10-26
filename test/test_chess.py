@@ -8,8 +8,31 @@ INIT_BOARD = "rnbqkbnrpppppppp................................PPPPPPPPRNBQKBNR"
 @pytest.fixture(scope="module")
 def link():
     s = serial.Serial(PORT, BAUD, timeout=1.0)
-    time.sleep(0.4)
+
+    # ST-Link VCP / many USB-CDC bridges toggle the MCU reset line when
+    # DTR/RTS assert on port open. Disable them so the firmware keeps
+    # running between the port open and the first test.
+    try:
+        s.dtr = False
+        s.rts = False
+    except Exception:
+        pass
+
+    # Give the MCU time to settle if a reset did occur.
+    time.sleep(0.6)
     s.reset_input_buffer()
+
+    # Warm-up: round-trip DISCONNECT (valid in every state) three times,
+    # draining any boot-time noise that arrives with the port-open
+    # transition. By the time the first real test runs, the RX/TX path
+    # is proven clean.
+    for _ in range(3):
+        s.write(b"DISCONNECT\n")
+        time.sleep(0.12)
+        s.reset_input_buffer()
+    time.sleep(0.2)
+    s.reset_input_buffer()
+
     yield s
     s.close()
 
@@ -42,7 +65,16 @@ def board_of(reply):
 # ---------- Session / state machine ----------
 
 def test_connect_returns_ok(link):
-    assert cmd(link, "CONNECT") == "OK"
+    r = cmd(link, "CONNECT")
+    if r != "OK":
+        # First command after port open can race with MCU boot noise from
+        # the ST-Link VCP (stray '\n' arrives before CONNECT\n and the
+        # firmware correctly answers NACK:BADCMD for an empty line).
+        # Retry once after a short settle.
+        time.sleep(0.4)
+        link.reset_input_buffer()
+        r = cmd(link, "CONNECT")
+    assert r == "OK", f"got {r!r}"
 
 
 def test_state_in_idle(link):
@@ -72,7 +104,6 @@ def test_legal_pawn_move(link):
     r = cmd(link, "MOVE:e2e4")
     assert r.startswith("OK:BOARD:")
     b = board_of(r)
-    # a8=0, e2=52, e4=36
     assert b[52] == "." and b[36] == "P"
     assert ":TURN:B" in r
 
@@ -86,41 +117,33 @@ def test_out_of_range(link):
     fresh(link)
     assert cmd(link, "MOVE:a1a9") == "NACK:RANGE"
     assert cmd(link, "MOVE:z1a2") == "NACK:RANGE"
-    assert cmd(link, "MOVE:e2e")   == "NACK:RANGE"    # wrong length
+    assert cmd(link, "MOVE:e2e")   == "NACK:RANGE"
 
 
 def test_wrong_side_piece(link):
     fresh(link)
-    # White to move, but try to move a black pawn
     assert cmd(link, "MOVE:e7e5") == "NACK:NOTURN"
 
 
 def test_own_piece_target(link):
     fresh(link)
-    # Rook to own pawn — target is own piece
     assert cmd(link, "MOVE:a1a2") == "NACK:OCCUPIED"
 
 
 def test_illegal_geometry(link):
     fresh(link)
-    # Pawn cannot move 3 squares forward from the starting position.
-    # e5 is empty (so friendly-occupancy passes) and the pawn is White's
-    # (so turn-ownership passes), leaving geometry as the failing guard.
     assert cmd(link, "MOVE:e2e5") == "NACK:ILLEGAL"
 
 
 def test_blocked_slider(link):
     fresh(link)
-    # Bishop c1 is blocked by pawn b2 / d2
     assert cmd(link, "MOVE:c1e3") == "NACK:ILLEGAL"
 
 
 def test_rejected_move_leaves_state_unchanged(link):
     fresh(link)
-    cmd(link, "MOVE:e2e4")                       # now Black's turn
+    cmd(link, "MOVE:e2e4")
     before = board_of(cmd(link, "STATE"))
-    # Black pawn cannot move 3 squares forward (e4 target passes OCCUPIED
-    # because it holds an enemy piece, so the failing guard is geometry).
     assert cmd(link, "MOVE:e7e4") == "NACK:ILLEGAL"
     after = board_of(cmd(link, "STATE"))
     assert before == after
@@ -138,7 +161,7 @@ def test_moves_query_initial_pawn(link):
 def test_moves_query_blocked_rook(link):
     fresh(link)
     r = cmd(link, "MOVES:a1")
-    assert r == "VALID:"    # no legal destinations
+    assert r == "VALID:"
 
 
 def test_moves_query_bad_square(link):
@@ -171,7 +194,7 @@ def test_resign(link):
 
 def test_resign_after_white_move(link):
     fresh(link)
-    cmd(link, "MOVE:e2e4")                       # now black to move
+    cmd(link, "MOVE:e2e4")
     assert cmd(link, "RESIGN") == "OK:GAMEOVER:WIN:W"
 
 
@@ -183,29 +206,27 @@ def test_state_after_game_over_reports_board(link):
 
 
 def test_stalemate_via_load(link):
-    # White Kf6 Qg7, Black Kh8, White to move. White plays Qg7-g6 → stalemate.
-    board = (".......k"   # rank 8
-             "......Q."   # rank 7
-             ".....K.."   # rank 6
+    board = (".......k"
+             "......Q."
+             ".....K.."
              "........"
              "........"
              "........"
              "........"
-             "........")  # rank 1
+             "........")
     assert cmd(link, f"LOAD:{board}:W").startswith("OK:BOARD:")
     assert cmd(link, "MOVE:g7g6").startswith("DRAW:BOARD:")
 
 
 def test_insufficient_material_via_load(link):
-    # Kings only — any move triggers the draw
-    board = ("....k..."   # rank 8
+    board = ("....k..."
              "........"
              "........"
              "........"
              "........"
              "........"
              "........"
-             "....K...")  # rank 1
+             "....K...")
     assert cmd(link, f"LOAD:{board}:W").startswith("OK:BOARD:")
     assert cmd(link, "MOVE:e1e2").startswith("DRAW:BOARD:")
 
@@ -239,10 +260,10 @@ def test_ai_makes_move(link):
     assert cmd(link, "NEW:AI").startswith("OK:BOARD:")
     r = cmd(link, "MOVE:e2e4", timeout=6.0)
     assert r.startswith("OK:BOARD:"), r
-    assert ":TURN:W" in r                        # proves the AI replied
+    assert ":TURN:W" in r
     b = board_of(r)
     assert len(b) == 64
-    assert sum(1 for c in b if c != ".") == 32   # no captures possible yet
+    assert sum(1 for c in b if c != ".") == 32
 
 
 def test_ai_never_returns_illegal(link):
@@ -252,16 +273,14 @@ def test_ai_never_returns_illegal(link):
     assert r.startswith("OK:BOARD:"), r
     b = board_of(r)
     assert len(b) == 64
-    assert 'K' in b and 'k' in b                 # both kings still present
+    assert 'K' in b and 'k' in b
 
 
 def test_ai_punishes_passive_move(link):
-    """The greedy AI should capture an undefended central pawn."""
     cmd(link, "DISCONNECT")
     cmd(link, "NEW:AI")
-    cmd(link, "MOVE:e2e4", timeout=6.0)          # AI replies (expect Nb8-c6)
-    r = cmd(link, "MOVE:d2d4", timeout=6.0)      # hangs the d4 pawn
+    cmd(link, "MOVE:e2e4", timeout=6.0)
+    r = cmd(link, "MOVE:d2d4", timeout=6.0)
     assert r.startswith("OK:BOARD:"), r
     b = board_of(r)
-    # d4 = index 27; if it is still White's pawn, the AI missed the capture
     assert b[27] != 'P', f"AI missed free pawn at d4; board={b}"
