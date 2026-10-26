@@ -145,4 +145,4 @@
 #define GPIOA_PUPDR_PA1_PA3_CLEAR_MASK  ((3U << 2) | (3U << 4) | (3U << 6))
 #define GPIOA_PUPDR_PA1_PA3_PULLUP      ((1U << 2) | (1U << 4) | (1U << 6))
 
-#endif // MAIN_H#endif // MAIN_H
+#endif // MAIN_H
