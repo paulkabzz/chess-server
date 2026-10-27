@@ -17,9 +17,9 @@ A **Qt 6 C++ GUI** on the host PC acts as a strictly thin client: it verifies ph
 |        PC Host        |                      |    STM32F051R8T6 (UCT Dev Board)   |
 |                       |                      |                                    |
 |  - Qt 6 C++ GUI       | <--- ST-Link VCP --> |  - Bare-Metal C Firmware (No HAL)  |
-|  - pytest Suite (29)  |     /dev/ttyACM0     |  - USART1: PA9 (TX) / PA10 (RX)    |
-|                       |   115200 Baud, 8N1   |  - Buttons: SW0..SW3 (PA0..PA3)    |
-|                       |                      |  - Status LEDs: D0..D1 (PB0..PB1)  |
+|  - pytest Suite (29)  |   /dev/ttyACM0 or    |  - USART1: PA9 (TX) / PA10 (RX)    |
+|                       |    COMx (Windows)    |  - Buttons: SW0..SW3 (PA0..PA3)    |
+|                       |   115200 Baud, 8N1   |  - Status LEDs: D0..D1 (PB0..PB1)  |
 +-----------------------+                      +------------------------------------+
 ```
 
@@ -47,15 +47,32 @@ brew install qt cmake
 pip3 install pyserial pytest
 ```
 
-### 2. Linux Serial Port Permissions
-Add your user to the `dialout` group so you can open `/dev/ttyACM0` without `sudo`:
-```bash
-sudo usermod -aG dialout "$USER"
-# Log out and log back in for the group change to take effect.
-```
+**Windows (10 / 11):**
+* **Option A (MSYS2 / MinGW64 — Recommended for CLI & `Makefile`):**  
+  Install [MSYS2](https://www.msys2.org/), open the **MSYS2 MinGW 64-bit** terminal, and run:
+  ```bash
+  pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake \
+            mingw-w64-x86_64-qt6-base mingw-w64-x86_64-qt6-serialport \
+            make
+  ```
+* **Option B (Official Qt Online Installer / Qt Creator):**  
+  Install **Qt 6.x (MinGW 64-bit)** alongside the **Qt SerialPort** additional library and **CMake** via the Qt Online Installer. You can open `CMakeLists.txt` directly in **Qt Creator** and click **Run**.
+* **Python Test Dependencies (PowerShell / CMD):**  
+  Install Python 3 from [python.org](https://www.python.org/) (check *"Add Python to PATH"*), then run:
+  ```powershell
+  pip install pyserial pytest
+  ```
+
+### 2. Serial Port Permissions & Drivers
+* **Linux:** Add your user to the `dialout` group so you can open `/dev/ttyACM0` without `sudo`:
+  ```bash
+  sudo usermod -aG dialout "$USER"
+  # Log out and log back in for the group change to take effect.
+  ```
+* **Windows:** Installing **STM32CubeIDE** automatically installs the **ST-Link VCP USB driver**. Plug in the board and check **Device Manager $\rightarrow$ Ports (COM & LPT)** to find your assigned port (e.g., `COM3` or `COM4` listed as *STMicroelectronics STLink Virtual COM Port*).
 
 ### 3. Embedded Toolchain
-Install **STM32CubeIDE** from STMicroelectronics to compile and flash the firmware onto the STM32F051R8T6 target.
+Install **STM32CubeIDE** (available for Linux, macOS, and Windows) from STMicroelectronics to compile and flash the firmware onto the STM32F051R8T6 target.
 
 ---
 
@@ -68,13 +85,13 @@ Install **STM32CubeIDE** from STMicroelectronics to compile and flash the firmwa
 5. Click the **Build** icon (Hammer), then click **Run** (Play icon) to flash the board over SWD.
 6. Once `"Download verified successfully"` appears, press the board's **RESET** button (`SW4`). Both `PB0` and `PB1` LEDs will turn **OFF** (`STATE_IDLE`).
 
-> **Note:** The single USB cable connected to the onboard ST-Link V2.1 provides power, SWD flashing, and the Virtual COM Port (`/dev/ttyACM0` on Linux, `/dev/cu.usbmodem*` on macOS). You do **not** need an external CP210x USB-UART adapter.
+> **Note:** The single USB cable connected to the onboard ST-Link V2.1 provides power, SWD flashing, and the Virtual COM Port (`/dev/ttyACM0` on Linux, `/dev/cu.usbmodem*` on macOS, `COMx` on Windows). You do **not** need an external CP210x USB-UART adapter.
 
 ---
 
 ## Makefile Quick Reference
 
-We provide a cross-platform `Makefile` that auto-detects your OS (`Linux`, `macOS`, `Windows`), CPU core count, and active serial port. Run these commands from the root `chess-server/` directory:
+We provide a cross-platform `Makefile` that auto-detects your OS (`Linux`, `macOS`, `Windows`), CPU core count, and active serial port (defaults to `COM3` on Windows). Run these commands from the root `chess-server/` directory (use **Git Bash** or **MSYS2 MinGW64** on Windows):
 
 | Command | Description |
 | :--- | :--- |
@@ -82,27 +99,45 @@ We provide a cross-platform `Makefile` that auto-detects your OS (`Linux`, `macO
 | `make gui` | Compile the Qt 6 C++ GUI into `./build/chess_gui` |
 | `make start_gui` | Launch the built GUI (automatically passes the detected serial port) |
 | `make test` | Run all 29 hardware-in-the-loop `pytest` vectors against the STM32 |
-| `make check` | Check if another process is currently holding the serial port |
-| `make free` | Terminate any stuck process holding the serial port |
+| `make check` | Check if another process is currently holding the serial port (Linux/macOS) |
+| `make free` | Terminate any stuck process holding the serial port (Linux/macOS) |
 | `make clean` | Remove `build/` and `pytest` cache artifacts |
 
-**Overriding the serial port manually (if needed):**
+**Overriding the serial port manually (Linux, macOS, or Windows):**
 ```bash
+# Linux / macOS:
 make start_gui PORT=/dev/ttyACM1
 make test PORT=/dev/cu.usbmodem14103
+
+# Windows (replace COM4 with the port shown in Device Manager):
+make start_gui PORT=COM4
+make test PORT=COM4
 ```
 
 ---
 
 ## Building & Running the Qt 6 GUI
 
-Build and launch the GUI in two commands:
+### Linux / macOS / Windows (MSYS2 or Git Bash)
 ```bash
 make gui
 make start_gui
 ```
 
-### How to Play & Hardware Controls
+### Windows Native Alternative (PowerShell / CMD / Qt Creator)
+If you do not have `make` installed on Windows, you can either open `CMakeLists.txt` directly in **Qt Creator** and click **Run**, or build from PowerShell/CMD using CMake:
+```powershell
+mkdir build
+cd build
+cmake .. -G "MinGW Makefiles"
+cmake --build . --parallel
+.\chess_gui.exe COM3
+```
+*(If you launch `chess_gui.exe` without a port argument, simply type your `COM` port—e.g., `COM3`—into the GUI's connection bar and click **Connect**.)*
+
+---
+
+## How to Play & Hardware Controls
 
 1. **Connect & Handshake:** Click **Connect**. The button turns orange (`"Connecting..."`) while sending `CONNECT\n` and starting a `1500 ms` timer. Once the STM32 replies with `OK`, the button turns green (`"Connected"`) and unlocks the game buttons.
 2. **Select Mode:** Click **New Game** (Human vs. Human) or **New vs AI** (you play White; the STM32's 1-ply heuristic engine plays Black).
@@ -122,10 +157,22 @@ make start_gui
 
 ## Running the Automated Test Suite (`pytest`)
 
-> **Important:** Make sure the GUI is closed before running the test suite so the serial port is not locked (or run `make free` first).
+> **Important:** Make sure the GUI (or any Serial Monitor) is closed before running the test suite so the serial port is not locked.
 
+**Linux / macOS / Windows (with `make`):**
 ```bash
 make test
+# Or specify your Windows COM port explicitly:
+make test PORT=COM3
+```
+
+**Windows (Direct PowerShell / CMD without `make`):**
+```powershell
+# PowerShell:
+$env:SERIAL_PORT="COM3"; python -m pytest -v test/test_chess.py
+
+# Command Prompt (cmd.exe):
+set SERIAL_PORT=COM3 && python -m pytest -v test/test_chess.py
 ```
 
 The test harness (`test/test_chess.py`) opens the serial port at `115200 8N1`, clears any ST-Link `DTR`/`RTS` boot glitches, and executes 29 deterministic hardware-in-the-loop tests:
@@ -150,7 +197,7 @@ test_chess.py::test_ai_punishes_passive_move PASSED              [100%]
 
 ## Serial Protocol Reference
 
-* **Framing:** Printable ASCII terminated by `\n` (`0x0A`); preceding `\r` (`0x0D`) is ignored.
+* **Framing:** Printable ASCII terminated by `\n` (`0x0A`); preceding `\r` (`0x0D`) is ignored for seamless cross-platform compatibility between Windows (`\r\n`) and POSIX (`\n`).
 * **Frame Bounds:** Max `75` payload bytes before `\n` (overflow latches and replies `NACK:BADCMD`); `500 ms` inter-byte receive timeout (incomplete frame flushes and replies `NACK:TIMEOUT`).
 * **Board Encoding:** Fixed 64-character ASCII string in row-major order from `a8` (index `0`) to `h1` (index `63`). Uppercase = White (`P, N, B, R, Q, K`), lowercase = Black (`p, n, b, r, q, k`), and `.` = empty square.
 
@@ -187,16 +234,18 @@ test_chess.py::test_ai_punishes_passive_move PASSED              [100%]
 
 ## Troubleshooting
 
-* **`Cannot open /dev/ttyACM0: Permission denied`**  
+* **Linux — `Cannot open /dev/ttyACM0: Permission denied`**  
   Run `sudo usermod -aG dialout "$USER"`, then log out and log back in.
-* **`Device or resource busy`**  
-  Another process (such as an open GUI window or serial monitor) is holding the port. Run `make check` to inspect it and `make free` to release it.
-* **No `/dev/ttyACM*` or `/dev/cu.usbmodem*` appears when plugged in**  
-  Check that you are using a data-capable USB cable (not a charge-only cable) connected to the onboard ST-Link port.
+* **Windows — `PermissionError(13, 'Access is denied.')` on `COMx`**  
+  Windows only allows one application to open a `COM` port at a time. Close the Qt 6 GUI, PuTTY, Arduino IDE, or STM32CubeIDE Serial Monitor before running `pytest` (or vice versa).
+* **Linux / macOS — `Device or resource busy`**  
+  Run `make check` to see which process holds the port, then `make free` to terminate it.
+* **No `/dev/ttyACM*`, `/dev/cu.usbmodem*`, or `COMx` port appears when plugged in**  
+  Check that you are using a data-capable USB cable (not a charge-only cable) plugged into the onboard ST-Link port. On Windows, ensure the ST-Link USB driver (bundled with STM32CubeIDE) is installed.
 * **`GUI connects ("Connecting...") then times out after 1.5 s`**  
-  Press the `RESET` button (`SW4`) on the STM32 board and ensure the firmware has been flashed via STM32CubeIDE.
-* **`qt.qpa.plugin: could not load`**  
-  Ensure the Qt 6 base development packages are installed (`qt6-qtbase-devel` on Fedora or `qt6-base-dev` on Ubuntu).
+  Verify you selected the ST-Link Virtual COM Port, press the `RESET` button (`SW4`) on the STM32 board, and ensure the firmware has been flashed via STM32CubeIDE.
+* **Windows — `Qt6Core.dll` or `Qt6SerialPort.dll was not found` when launching `chess_gui.exe`**  
+  Either run the executable from your **MSYS2 MinGW 64-bit** terminal (where Qt's `bin/` directory is already in `PATH`), or run `windeployqt .\build\chess_gui.exe` to copy the required Qt DLLs into the `build/` folder.
 
 ---
 
