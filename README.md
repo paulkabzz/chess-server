@@ -25,26 +25,6 @@ A **Qt 6 C++ GUI** on the host PC acts as a strictly thin client: it verifies ph
 
 ---
 
-## Repository Structure
-
-```text
-chess-server/
-├── main.c                    # Bare-metal STM32F051 firmware (UART, FSM, Chess engine, 1-ply AI)
-├── main.h                    # Register addresses, bitmasks & hardware macros
-├── startup_stm32f051r8tx.s   # Cortex-M0 vector table
-├── STM32F051R8TX_FLASH.ld    # Linker script (64 KB Flash, 8 KB SRAM)
-├── syscalls.c, sysmem.c      # STM32CubeIDE runtime boilerplate
-├── .project / .cproject      # STM32CubeIDE project configuration
-├── main.cpp                  # Qt 6 C++ thin-client GUI
-├── CMakeLists.txt            # CMake build configuration for the Qt 6 GUI
-├── Makefile                  # Cross-platform build, port detection & test automation
-├── test/
-│   └── test_chess.py         # 29-vector automated pytest hardware verification suite
-└── README.md                 # Project documentation & setup guide
-```
-
----
-
 ## Prerequisites
 
 ### 1. Host PC Dependencies (Qt 6, CMake, Python Test Suite)
